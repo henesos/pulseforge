@@ -34,6 +34,7 @@ public class RunService {
 
     private final TestRunRepository runs;
     private final ScenarioService scenarios;
+    private final WorkerRegistry workers;
     private final Connection nats;
     private final RunProperties properties;
     private final Clock clock;
@@ -41,11 +42,13 @@ public class RunService {
     public RunService(
             TestRunRepository runs,
             ScenarioService scenarios,
+            WorkerRegistry workers,
             Connection nats,
             RunProperties properties,
             Clock clock) {
         this.runs = runs;
         this.scenarios = scenarios;
+        this.workers = workers;
         this.nats = nats;
         this.properties = properties;
         this.clock = clock;
@@ -56,8 +59,13 @@ public class RunService {
         ScenarioEntity entity = scenarios.findById(scenarioId);
         Scenario scenario = scenarios.parse(entity);
 
-        // Phase 2 runs a single shard. Phase 3 replaces this with the live worker count from Redis.
-        int workerCount = 1;
+        // The fleet size is read once and frozen into the run. If it were re-read as workers came
+        // and went, the arrival rate would shift mid-run and the results would describe two
+        // different experiments stitched together.
+        int workerCount = workers.liveWorkerCount();
+        if (workerCount == 0) {
+            throw new NoWorkersAvailableException();
+        }
 
         TestRunEntity run =
                 runs.save(
@@ -142,6 +150,13 @@ public class RunService {
     public static class RunNotFoundException extends RuntimeException {
         public RunNotFoundException(UUID id) {
             super("no run with id " + id);
+        }
+    }
+
+    /** Refusing beats accepting a run that nothing will execute and that would sit RUNNING. */
+    public static class NoWorkersAvailableException extends RuntimeException {
+        public NoWorkersAvailableException() {
+            super("no load workers are registered; start at least one before triggering a run");
         }
     }
 }

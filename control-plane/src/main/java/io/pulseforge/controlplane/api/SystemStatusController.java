@@ -1,5 +1,6 @@
 package io.pulseforge.controlplane.api;
 
+import io.pulseforge.controlplane.service.WorkerRegistry;
 import java.time.Clock;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -26,14 +27,17 @@ import org.springframework.web.bind.annotation.RestController;
 public class SystemStatusController {
 
     private final HealthEndpoint healthEndpoint;
+    private final WorkerRegistry workers;
     private final Clock clock;
     private final String version;
 
     public SystemStatusController(
             HealthEndpoint healthEndpoint,
+            WorkerRegistry workers,
             Clock clock,
             @Value("${pulseforge.version:0.1.0}") String version) {
         this.healthEndpoint = healthEndpoint;
+        this.workers = workers;
         this.clock = clock;
         this.version = version;
     }
@@ -51,7 +55,11 @@ public class SystemStatusController {
 
         SystemStatusResponse body =
                 new SystemStatusResponse(
-                        health.getStatus().getCode(), version, clock.instant(), components);
+                        health.getStatus().getCode(),
+                        version,
+                        clock.instant(),
+                        workers.liveWorkerCount(),
+                        components);
 
         HttpStatus httpStatus =
                 Status.UP.equals(health.getStatus())

@@ -40,6 +40,11 @@ public class ApiExceptionHandler {
         return problem(HttpStatus.NOT_FOUND, "Run not found", e.getMessage());
     }
 
+    @ExceptionHandler(RunService.NoWorkersAvailableException.class)
+    public ProblemDetail onNoWorkers(RunService.NoWorkersAvailableException e) {
+        return problem(HttpStatus.CONFLICT, "No workers available", e.getMessage());
+    }
+
     private static ProblemDetail problem(HttpStatus status, String title, String detail) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
         problem.setTitle(title);

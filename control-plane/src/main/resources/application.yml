@@ -45,6 +45,8 @@ pulseforge:
     dispatch-lead: 2s
     # Grace period for in-flight snapshots to reach ClickHouse after the last worker reports.
     settle-delay: 5s
+    # How often active runs are checked for workers that stopped reporting.
+    watchdog-interval: 5s
   nats:
     url: nats://localhost:4222
     connection-timeout: 5s
