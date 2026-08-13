@@ -1,0 +1,22 @@
+# Single source of truth for every dependency version in the build.
+[versions]
+java = "21"
+springBoot = "3.3.5"
+springDependencyManagement = "1.1.6"
+hdrHistogram = "2.2.2"
+jnats = "2.20.4"
+clickhouseJdbc = "0.6.5"
+lz4 = "1.8.0"
+testcontainers = "1.20.3"
+
+[libraries]
+hdrhistogram = { module = "org.hdrhistogram:HdrHistogram", version.ref = "hdrHistogram" }
+jnats = { module = "io.nats:jnats", version.ref = "jnats" }
+clickhouse-jdbc = { module = "com.clickhouse:clickhouse-jdbc", version.ref = "clickhouseJdbc" }
+clickhouse-http-client = { module = "com.clickhouse:clickhouse-http-client", version.ref = "clickhouseJdbc" }
+lz4-java = { module = "org.lz4:lz4-java", version.ref = "lz4" }
+testcontainers-bom = { module = "org.testcontainers:testcontainers-bom", version.ref = "testcontainers" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "springBoot" }
+spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "springDependencyManagement" }
