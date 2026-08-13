@@ -28,9 +28,15 @@ pulseforge:
   worker:
     # id defaults to the container hostname
     heartbeat-interval: 2s
+    # One snapshot per step per interval. Lower means finer-grained results and more bus traffic;
+    # this is the knob that keeps message volume independent of request rate.
     snapshot-interval: 1s
-    metric-queue-capacity: 1024
+    # Bounded on purpose: on overflow samples are dropped and counted, never allowed to block the
+    # generator. Sized for ~1s of samples at a high rate.
+    metric-queue-capacity: 65536
     max-concurrent-requests: 10000
+    connect-timeout: 5s
+    request-timeout: 30s
 
 logging:
   level:
