@@ -39,7 +39,12 @@ management:
       enabled: true
 
 pulseforge:
-  version: 0.1.0
+  version: 0.2.0
+  run:
+    # Lead time so every worker has the command before the shared start instant arrives.
+    dispatch-lead: 2s
+    # Grace period for in-flight snapshots to reach ClickHouse after the last worker reports.
+    settle-delay: 5s
   nats:
     url: nats://localhost:4222
     connection-timeout: 5s

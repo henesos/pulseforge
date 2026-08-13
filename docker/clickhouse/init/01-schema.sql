@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS pulseforge.metric_snapshots
     -- dropped samples is reported with the count, because silently losing data is worse than
     -- admitting an incomplete sample.
     dropped_samples UInt64,
+    -- Requests the generator was scheduled to send but could not, because the in-flight ceiling
+    -- was reached. A non-zero value means the offered rate was not actually achieved.
+    skipped_requests UInt64 DEFAULT 0,
 
     min_micros      UInt64,
     max_micros      UInt64,
@@ -66,6 +69,7 @@ SELECT
     sum(request_count)                                 AS requests,
     sum(error_count)                                   AS errors,
     sum(dropped_samples)                               AS dropped,
+    sum(skipped_requests)                              AS skipped,
     if(sum(request_count) = 0, 0,
        sum(error_count) * 100.0 / sum(request_count))  AS error_rate_percent,
     if(sum(request_count) = 0, 0,
