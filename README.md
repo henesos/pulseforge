@@ -19,7 +19,7 @@ see [Design Decisions](#design-decisions).
 Requires only Docker. No JDK or Gradle on the host — the build runs inside the image.
 
 ```bash
-git clone https://github.com/<owner>/pulseforge.git
+git clone https://github.com/henesos/pulseforge.git
 cd pulseforge/docker
 docker compose up -d --build
 ```
