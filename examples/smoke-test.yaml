@@ -1,0 +1,28 @@
+# Short scenario for verifying the pipeline end to end. The full baseline scenario lives in
+# checkout-flow-baseline.yaml.
+name: smoke-test
+target: http://target-service:8081
+
+duration: 20s
+rampUp: 5s
+arrivalRate: 200
+
+steps:
+  - method: GET
+    path: /api/fast
+    weight: 60
+
+  - method: POST
+    path: /api/slow
+    weight: 30
+    body: '{"item":"sku-1"}'
+    headers:
+      Content-Type: application/json
+
+  - method: GET
+    path: /api/flaky
+    weight: 10
+
+assertions:
+  - p95 < 400ms
+  - errorRate < 5%

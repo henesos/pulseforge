@@ -8,9 +8,9 @@ This is a reference implementation built to demonstrate distributed-systems desi
 production product. The interesting parts are the measurement decisions, not the feature list —
 see [Design Decisions](#design-decisions).
 
-> **Status: Phase 1 of 4 complete.** The full stack builds and runs; the target service and the
-> control plane's status API are functional. Load generation, metric ingestion and result queries
-> land in Phase 2. See [Roadmap](#roadmap).
+> **Status: Phase 2 of 4 complete — the tool works end to end.** Submit a scenario, start a run,
+> get merged percentiles and a PASS/FAIL verdict. Multi-worker sharding, heartbeats and the gRPC
+> ingestion path are Phases 3 and 4. See [Roadmap](#roadmap).
 
 ---
 
@@ -62,11 +62,56 @@ $ curl -s localhost:8080/api/v1/system/status | jq
 The endpoint returns **503** if any dependency is down, so a CI smoke test can rely on the HTTP
 status alone.
 
-Scale the generator fleet horizontally:
+### Running a load test
+
+```bash
+# 1. Submit a scenario
+curl -X POST localhost:8080/api/v1/scenarios \
+     -H 'Content-Type: application/x-yaml' \
+     --data-binary @examples/smoke-test.yaml
+# -> {"id":"371484cb-...","name":"smoke-test","arrivalRate":200,"assertions":["p95 < 400ms",...]}
+
+# 2. Start a run
+curl -X POST 'localhost:8080/api/v1/runs?scenarioId=371484cb-...'
+# -> {"id":"63c11c95-...","status":"RUNNING","expectedWorkers":1,...}
+
+# 3. Read the results (202 while running, 200 once terminal)
+curl -s localhost:8080/api/v1/runs/63c11c95-.../results | jq
+```
+
+Actual output from the smoke-test scenario (200 req/s for 20s with a 5s ramp, three weighted
+steps):
+
+```
+step                requests   errors   err%      p50       p95       p99       max
+GET /api/fast          2 086        0   0.00%   2.24ms    3.70ms    4.43ms   59.07ms
+GET /api/flaky           370       31   8.38%  21.33ms   22.35ms   23.31ms   25.87ms
+POST /api/slow         1 044        0   0.00% 149.76ms  178.69ms  181.38ms  182.40ms
+-------------------------------------------------------------------------------------
+run total              3 500       31   0.89%   3.30ms  170.62ms  180.22ms  182.40ms
+
+throughput 165.9 req/s   workers 1   dropped samples 0   skipped requests 0
+
+ASSERTIONS                      actual     result
+  p95 < 400ms                  170.62ms     PASS
+  errorRate < 5%                  0.89%     PASS
+                                          -------
+                                            PASS
+```
+
+The request count is not approximate: a 5s linear ramp to 200 req/s delivers exactly 500 requests
+(the triangle under the ramp), plus 15s of steady state at 200 req/s — **3 500**, which is what
+the run issued. And 61 snapshot messages crossed the bus for those 3 500 requests, because workers
+ship one histogram per step per second rather than one message per request.
+
+### Scaling the fleet
 
 ```bash
 docker compose up -d --scale load-worker=5
 ```
+
+Phase 2 dispatches to a single shard; the shard-claiming logic that divides the arrival rate across
+a fleet arrives in Phase 3.
 
 ### The target under test
 
@@ -219,6 +264,11 @@ workers. ClickHouse does the merge; the arithmetic happens once, over the whole 
 significant digits) rather than exact. That is a known, quantified error — unlike averaging, which
 is unbounded and unquantifiable.
 
+`HistogramMergeTest` pins this down with two workers — one handling 10 000 fast requests, one
+handling 100 slow ones. Averaging their p99s reports **~100 ms**; the population's actual p99 is
+**~5 ms**, because those 100 slow samples sit entirely above the 99th percentile. A 20× error, in
+whichever direction the traffic split happens to push it.
+
 ### 3. Backpressure drops samples; it never slows the generator
 
 **Problem.** If the metric pipeline stalls, something has to give. Blocking the load generator
@@ -306,6 +356,11 @@ Deliberately out of scope for a portfolio reference implementation:
 - **In-memory run state.** Redis persistence is off; a Redis restart mid-run loses liveness data.
 - **No result retention policy beyond a 30-day TTL** on the ClickHouse tables.
 - **Percentile precision is bounded** by histogram bucket resolution (see decision 2).
+- **Reported throughput averages over the whole run, ramp-up included.** A 20s run with a 5s ramp
+  to 200 req/s reports ~166 req/s, not 200 — the ramp genuinely delivered less. Correct, but worth
+  knowing before writing a `throughput >` assertion.
+- **Assertions cover p50, p95 and p99 only.** A `p99.9` assertion is rejected at evaluation time
+  rather than silently answered with p99.
 
 ---
 
@@ -314,9 +369,13 @@ Deliberately out of scope for a portfolio reference implementation:
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Gradle multi-module skeleton, compose stack, target service, control-plane status API | ✅ Done |
-| 2 | Single worker end to end: YAML parsing, NATS dispatch, load generation, HdrHistogram, ClickHouse write, result query | Next |
-| 3 | Distributed scaling: rate sharding across workers, Redis heartbeats, global percentile merge, dropped-sample accounting | Planned |
-| 4 | Ramp-up, assertion engine, gRPC ingestion path, Testcontainers integration tests, architecture docs | Planned |
+| 2 | End to end: YAML parsing, NATS dispatch, open-loop generation, HdrHistogram aggregation, ClickHouse ingestion, merged percentiles, assertion verdict | ✅ Done |
+| 3 | Distributed scaling: shard claiming across workers, Redis heartbeats, DEGRADED detection | Next |
+| 4 | gRPC ingestion path, CLI with CI exit codes, Testcontainers integration tests | Planned |
+
+Ramp-up and the assertion engine were originally scheduled for Phase 4 but landed in Phase 2 —
+the arrival-schedule maths needed the ramp anyway, and results without a verdict are only half a
+feature.
 
 ---
 
@@ -332,6 +391,9 @@ docker run --rm -u $(id -u):$(id -g) \
 ```
 
 A local JDK 21 works too, via `./gradlew build`.
+
+The unit tests cover the parts where a subtle error would silently corrupt results: the arrival
+schedule's ramp-up integral, scenario and assertion parsing, and the histogram merge.
 
 ### Tech stack
 
