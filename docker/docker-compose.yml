@@ -1,0 +1,187 @@
+name: pulseforge
+
+# Every service is reachable by its compose service name on the `pulseforge` network, which is why
+# scenarios target `http://target-service:8081` rather than localhost.
+#
+# Healthchecks use 127.0.0.1 rather than localhost on purpose: busybox wget resolves localhost to
+# ::1 first, and several of these servers bind IPv4 only.
+
+x-jvm-service: &jvm-service
+  restart: unless-stopped
+  networks: [pulseforge]
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulseforge-postgres
+    environment:
+      POSTGRES_DB: pulseforge
+      POSTGRES_USER: pulseforge
+      POSTGRES_PASSWORD: pulseforge
+    ports: ["5432:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulseforge -d pulseforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [pulseforge]
+
+  redis:
+    image: redis:7-alpine
+    container_name: pulseforge-redis
+    # Live run state only: nothing here needs to survive a restart, so persistence is off.
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [pulseforge]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: pulseforge-clickhouse
+    environment:
+      CLICKHOUSE_DB: pulseforge
+      CLICKHOUSE_USER: pulseforge
+      CLICKHOUSE_PASSWORD: pulseforge
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 30s
+    networks: [pulseforge]
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: pulseforge-nats
+    # -js enables JetStream (durable metric delivery), -m exposes the monitoring port.
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [pulseforge]
+
+  target-service:
+    <<: *jvm-service
+    container_name: pulseforge-target
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: target-service
+    ports: ["8081:8081"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8081/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  control-plane:
+    <<: *jvm-service
+    container_name: pulseforge-control-plane
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: control-plane
+    ports: ["8080:8080"]
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/pulseforge
+      SPRING_DATA_REDIS_HOST: redis
+      PULSEFORGE_NATS_URL: nats://nats:4222
+      PULSEFORGE_CLICKHOUSE_HTTP_URL: http://clickhouse:8123
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  metrics-ingestor:
+    <<: *jvm-service
+    container_name: pulseforge-metrics-ingestor
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: metrics-ingestor
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:clickhouse://clickhouse:8123/pulseforge
+      PULSEFORGE_NATS_URL: nats://nats:4222
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8083/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  load-worker:
+    <<: *jvm-service
+    # No container_name and no published ports: this service is meant to be run as
+    #   docker compose up -d --scale load-worker=5
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: load-worker
+    environment:
+      SPRING_DATA_REDIS_HOST: redis
+      PULSEFORGE_NATS_URL: nats://nats:4222
+      # ZGC keeps generator pauses out of the latency measurements.
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -XX:+UseZGC -XX:+ZGenerational"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8082/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+
+networks:
+  pulseforge:
+    driver: bridge
