@@ -8,9 +8,9 @@ This is a reference implementation built to demonstrate distributed-systems desi
 production product. The interesting parts are the measurement decisions, not the feature list —
 see [Design Decisions](#design-decisions).
 
-> **Status: Phase 2 of 4 complete — the tool works end to end.** Submit a scenario, start a run,
-> get merged percentiles and a PASS/FAIL verdict. Multi-worker sharding, heartbeats and the gRPC
-> ingestion path are Phases 3 and 4. See [Roadmap](#roadmap).
+> **Status: Phase 3 of 4 complete — distributed and fault-aware.** Load is sharded across a scaled
+> worker fleet, percentiles are merged globally, and a worker that dies mid-run turns the result
+> DEGRADED instead of quietly shortening it. See [Roadmap](#roadmap).
 
 ---
 
@@ -108,10 +108,44 @@ ship one histogram per step per second rather than one message per request.
 
 ```bash
 docker compose up -d --scale load-worker=5
+curl -s localhost:8080/api/v1/system/status | jq .liveWorkers   # -> 5
 ```
 
-Phase 2 dispatches to a single shard; the shard-claiming logic that divides the arrival rate across
-a fleet arrives in Phase 3.
+Workers claim shards themselves with a single atomic Redis `INCR`; the Nth worker to see the
+broadcast command takes shard N-1. No leader election, and no window in which two workers hold the
+same shard and silently double the offered rate.
+
+```
+$ docker compose logs load-worker | grep 'claimed shard'
+load-worker-6  Run fd4cee3b...: claimed shard 0 of 5, generating 40.0 req/s
+load-worker-2  Run fd4cee3b...: claimed shard 1 of 5, generating 40.0 req/s
+load-worker-3  Run fd4cee3b...: claimed shard 2 of 5, generating 40.0 req/s
+load-worker-4  Run fd4cee3b...: claimed shard 3 of 5, generating 40.0 req/s
+load-worker-5  Run fd4cee3b...: claimed shard 4 of 5, generating 40.0 req/s
+```
+
+The same scenario run on 1 worker and on 5 issues **3 500 requests either way** — the shards sum
+back to the requested rate exactly, remainder included.
+
+### When a worker dies
+
+```bash
+docker kill --signal=KILL pulseforge-load-worker-4      # mid-run, no chance to deregister
+```
+
+```
+$ curl -s localhost:8080/api/v1/runs/fd1e9439-.../results | jq '.results | {status, statusReason, totalRequests}'
+{
+  "status": "DEGRADED",
+  "statusReason": "1 of 5 worker shards stopped reporting (4 alive, 0 finished); the run generated less than the requested 250 req/s",
+  "totalRequests": 12297
+}
+```
+
+Detected 5 seconds after the kill. A full 60s run at 250 req/s would have issued ~14 375 requests;
+this one managed 12 297 — and **its assertions still pass**. That is precisely why `DEGRADED` is a
+status rather than a footnote: the percentiles look perfectly healthy and describe an experiment
+that never actually ran.
 
 ### The target under test
 
@@ -317,12 +351,22 @@ percentiles — from an experiment that never actually ran.
 **Options.** (a) Ignore it. (b) Abort the whole run. (c) Detect it, finish the run, and mark the
 result.
 
-**Choice.** (c). Workers heartbeat into Redis with a TTL; the control plane watches for expiry. A
-run that loses a worker terminates as `DEGRADED` with a `status_reason` naming the worker.
-`DEGRADED` is a first-class terminal state alongside `COMPLETED`, not a flag hidden inside it.
+**Choice.** (c). Liveness is a Redis key with a TTL that gets refreshed, not a registration that
+gets deleted on shutdown — a worker that is SIGKILLed, partitioned or wedged in a GC pause never
+gets to deregister itself, and those are exactly the failures worth catching. Expiry *is* the
+signal. The check is `claimed shards == still alive + already finished`; anything missing from both
+sides stopped without saying so, and the run terminates as `DEGRADED` with a reason naming the
+shortfall.
 
-**Trade-off.** Requires liveness tracking and a reaper the system would otherwise not need. Worth
-it: the alternative is a report that looks correct and isn't.
+Two levels of liveness exist because they answer different questions: fleet presence
+(`pulseforge:workers:*`) says which workers are available to receive a run, per-run liveness
+(`pulseforge:run:<id>:alive:*`) says which are actually generating load right now. A process can be
+healthy while its generator thread is dead.
+
+**Trade-off.** Requires liveness tracking and a watchdog the system would otherwise not need, and
+the TTL sets a floor on detection latency (~6s at a 2s heartbeat — three beats, so one missed
+heartbeat from a GC pause is not mistaken for a death). Worth it: the alternative is a report that
+looks correct and isn't.
 
 ### 6. Ramp-up is part of the load profile, not a client-side courtesy
 
@@ -361,6 +405,12 @@ Deliberately out of scope for a portfolio reference implementation:
   knowing before writing a `throughput >` assertion.
 - **Assertions cover p50, p95 and p99 only.** A `p99.9` assertion is rejected at evaluation time
   rather than silently answered with p99.
+- **Per-worker latency is not queryable.** `latency_buckets` carries no `worker_id` column — the
+  table exists to be merged across workers, and adding the dimension would invite exactly the
+  averaging mistake decision 2 is about. The cost is real: "which worker saw the slow tail?" cannot
+  be answered from the bucket table, only from the raw histogram blobs in `metric_snapshots`.
+- **Fleet size is frozen at dispatch.** Workers that start mid-run sit the run out rather than
+  joining, since a rate that changes halfway through would splice two experiments together.
 
 ---
 
@@ -370,8 +420,8 @@ Deliberately out of scope for a portfolio reference implementation:
 |-------|-------|--------|
 | 1 | Gradle multi-module skeleton, compose stack, target service, control-plane status API | ✅ Done |
 | 2 | End to end: YAML parsing, NATS dispatch, open-loop generation, HdrHistogram aggregation, ClickHouse ingestion, merged percentiles, assertion verdict | ✅ Done |
-| 3 | Distributed scaling: shard claiming across workers, Redis heartbeats, DEGRADED detection | Next |
-| 4 | gRPC ingestion path, CLI with CI exit codes, Testcontainers integration tests | Planned |
+| 3 | Distributed scaling: atomic shard claiming, two-level Redis liveness, DEGRADED detection | ✅ Done |
+| 4 | gRPC ingestion path, CLI with CI exit codes, Testcontainers integration tests | Next |
 
 Ramp-up and the assertion engine were originally scheduled for Phase 4 but landed in Phase 2 —
 the arrival-schedule maths needed the ramp anyway, and results without a verdict are only half a

@@ -1,0 +1,17 @@
+# Long enough to kill a worker mid-run and watch the control plane notice.
+# See the "Worker failure" design decision in the README.
+name: degraded-demo
+target: http://target-service:8081
+
+duration: 60s
+rampUp: 5s
+arrivalRate: 250
+
+steps:
+  - method: GET
+    path: /api/fast
+    weight: 100
+
+assertions:
+  - p95 < 500ms
+  - errorRate < 5%
