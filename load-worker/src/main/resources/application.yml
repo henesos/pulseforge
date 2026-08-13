@@ -1,0 +1,37 @@
+spring:
+  application:
+    name: load-worker
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 2s
+
+server:
+  # Workers are scaled with `--scale`, so this port is never published to the host.
+  port: 8082
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+pulseforge:
+  nats:
+    url: nats://localhost:4222
+    connection-timeout: 5s
+    reconnect-wait: 2s
+  worker:
+    # id defaults to the container hostname
+    heartbeat-interval: 2s
+    snapshot-interval: 1s
+    metric-queue-capacity: 1024
+    max-concurrent-requests: 10000
+
+logging:
+  level:
+    io.pulseforge: INFO
