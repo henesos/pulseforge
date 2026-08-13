@@ -7,6 +7,8 @@ import io.pulseforge.common.protocol.StartRunCommand;
 import io.pulseforge.common.protocol.WorkerFinished;
 import io.pulseforge.common.serde.JsonCodec;
 import io.pulseforge.worker.config.WorkerProperties;
+import io.pulseforge.worker.coordination.RunLiveness;
+import io.pulseforge.worker.coordination.ShardClaim;
 import io.pulseforge.worker.http.RequestExecutor;
 import io.pulseforge.worker.metrics.MetricPipeline;
 import jakarta.annotation.PreDestroy;
@@ -40,16 +42,24 @@ public class WorkerRunCoordinator {
     private final Connection nats;
     private final WorkerProperties properties;
     private final HttpClient httpClient;
+    private final ShardClaim shardClaim;
+    private final RunLiveness runLiveness;
     private final ConcurrentHashMap<UUID, ActiveRun> activeRuns = new ConcurrentHashMap<>();
     private final AtomicInteger runThreadCounter = new AtomicInteger();
 
     private Dispatcher dispatcher;
 
     public WorkerRunCoordinator(
-            Connection nats, WorkerProperties properties, HttpClient httpClient) {
+            Connection nats,
+            WorkerProperties properties,
+            HttpClient httpClient,
+            ShardClaim shardClaim,
+            RunLiveness runLiveness) {
         this.nats = nats;
         this.properties = properties;
         this.httpClient = httpClient;
+        this.shardClaim = shardClaim;
+        this.runLiveness = runLiveness;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -79,7 +89,10 @@ public class WorkerRunCoordinator {
             return;
         }
 
-        int shardIndex = 0;
+        int shardIndex = shardClaim.claim(command.runId(), command.workerCount());
+        if (shardIndex == ShardClaim.NO_SHARD) {
+            return;
+        }
         startRun(command, shardIndex);
     }
 
@@ -128,6 +141,14 @@ public class WorkerRunCoordinator {
 
         ActiveRun activeRun = new ActiveRun(execution, aggregator, pipeline);
         activeRuns.put(command.runId(), activeRun);
+        runLiveness.start(command.runId(), properties.id(), properties.heartbeatInterval());
+
+        log.info(
+                "Run {}: claimed shard {} of {}, generating {} req/s",
+                command.runId(),
+                shardIndex,
+                command.workerCount(),
+                String.format("%.1f", command.rateForShard(shardIndex)));
 
         ThreadFactory factory = runnable -> {
             Thread thread = new Thread(runnable);
@@ -152,6 +173,9 @@ public class WorkerRunCoordinator {
             // interval of samples is lost.
             activeRun.aggregator().stop();
             activeRuns.remove(command.runId());
+            // Liveness is cleared before the completion notice so the control plane can never see
+            // "finished" and "still alive" at the same time.
+            runLiveness.stop(command.runId(), properties.id());
             announceFinished(command, shardIndex, activeRun);
         }
     }
