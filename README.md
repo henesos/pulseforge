@@ -274,19 +274,52 @@ pulseforge run examples/checkout-flow-baseline.yaml --control-plane http://pulse
 | `2` | the run was degraded: a worker was lost, or samples were dropped |
 | `3` | usage error, unreachable control plane, or invalid scenario |
 
-`2` is deliberately distinct from `1`. A degraded run outranks the assertions: reporting PASS for a
-test that lost a shard is exactly the failure this project exists to prevent, and the two cases
-call for different reactions — one is a code regression, the other is infrastructure to fix and a
-reason to re-run.
+`2` is deliberately distinct from `1`, and this is the case that shows why. A worker was SIGKILLed
+mid-run:
+
+```
+run DEGRADED
+
+step                      requests   errors    err%       p50       p95       p99       max
+------------------------------------------------------------------------------------------
+GET /api/fast                 2253        0   0.00%    2.00ms    3.28ms    3.65ms   26.77ms
+
+throughput 148.1 req/s   workers 3   dropped samples 0   skipped requests 0
+
+!! run status DEGRADED
+   1 of 3 worker shards stopped reporting (2 alive, 0 finished); the run generated less than
+   the requested 250 req/s
+
+ASSERTIONS                         actual   result
+  p95 < 500ms                        3.28   PASS
+  errorRate < 5%                     0.00   PASS
+
+  PASS
+$ echo $?
+2
+```
+
+**The assertions passed and the command still failed.** A degraded run outranks its own verdict:
+the percentiles are perfectly healthy and describe an experiment that never fully ran. The two exit
+codes call for different reactions — `1` is a code regression to investigate, `2` is infrastructure
+to fix and a reason to re-run.
 
 ### Choosing a metric transport
 
 ```bash
-METRICS_TRANSPORT=grpc docker compose up -d --scale load-worker=5
+METRICS_TRANSPORT=grpc docker compose up -d --scale load-worker=3
 ```
 
-Both paths feed the same bounded buffer and the same batching writer in the ingestor, so switching
-transport cannot quietly change how data is persisted — only how it travels.
+```
+load-worker-2  GrpcSnapshotTransport   : gRPC snapshot transport targeting metrics-ingestor:9090
+load-worker-2  TransportConfiguration  : Shipping snapshots over grpc
+metrics-ingestor  GrpcIngestionServer   : gRPC ingestion listening on port 9090
+```
+
+The same scenario over gRPC produced the same 3 501 requests and the same percentiles as over NATS,
+with `sum(count)` in `latency_buckets` matching `sum(request_count)` exactly — no duplication, no
+loss. Both paths feed the same bounded buffer and the same batching writer in the ingestor, so
+switching transport cannot quietly change how data is persisted, only how it travels.
 
 |  | NATS (default) | gRPC |
 |---|---|---|
@@ -453,6 +486,12 @@ Deliberately out of scope for a portfolio reference implementation:
   be answered from the bucket table, only from the raw histogram blobs in `metric_snapshots`.
 - **Fleet size is frozen at dispatch.** Workers that start mid-run sit the run out rather than
   joining, since a rate that changes halfway through would splice two experiments together.
+- **Shard rounding shifts the total by a request or two.** 200 req/s across 3 workers gives shards
+  of 67/67/66 — exact — but each shard rounds its own ramp-up integral independently, so a run may
+  issue 3 501 rather than 3 500. Visible, bounded, and not worth a distributed counter to remove.
+- **gRPC ingestion is single-endpoint.** Workers dial one ingestor address with no client-side load
+  balancing, so scaling ingestors horizontally needs a proxy in front. The NATS path scales by
+  simply adding a subscriber.
 
 ---
 

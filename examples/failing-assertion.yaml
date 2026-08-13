@@ -1,0 +1,20 @@
+# Deliberately unattainable: /api/slow injects ~150ms, so a 50ms p95 budget cannot be met.
+# Used to verify the CLI reports a regression with exit code 1 rather than passing quietly.
+name: failing-assertion-demo
+target: http://target-service:8081
+
+duration: 15s
+rampUp: 3s
+arrivalRate: 100
+
+steps:
+  - method: POST
+    path: /api/slow
+    weight: 100
+    body: '{"item":"sku-1"}'
+    headers:
+      Content-Type: application/json
+
+assertions:
+  - p95 < 50ms
+  - errorRate < 1%
