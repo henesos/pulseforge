@@ -11,3 +11,6 @@ bin/
 *.iml
 .vscode/
 .DS_Store
+
+# Personal tool settings, not team configuration.
+.claude/settings.local.json
