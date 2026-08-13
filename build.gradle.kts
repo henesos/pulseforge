@@ -55,4 +55,24 @@ subprojects {
             events("passed", "skipped", "failed")
         }
     }
+
+    // Integration tests (*IT) need a Docker daemon for Testcontainers, so they are kept out of the
+    // default `test` task: `gradle build` must stay runnable anywhere, and a fast unit-test loop is
+    // worth more than the convenience of one command.
+    tasks.named<Test>("test") {
+        exclude("**/*IT.class")
+    }
+
+    // Captured here: inside the task-configuration block the receiver is the Test task, whose
+    // extension container has no SourceSetContainer.
+    val testSourceSet = the<SourceSetContainer>()["test"]
+
+    tasks.register<Test>("integrationTest") {
+        description = "Runs Testcontainers-backed integration tests."
+        group = "verification"
+        testClassesDirs = testSourceSet.output.classesDirs
+        classpath = testSourceSet.runtimeClasspath
+        include("**/*IT.class")
+        shouldRunAfter(tasks.named("test"))
+    }
 }

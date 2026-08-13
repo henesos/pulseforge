@@ -1,11 +1,9 @@
 package io.pulseforge.worker.run;
 
-import io.nats.client.Connection;
 import io.pulseforge.common.protocol.HistogramSnapshot;
-import io.pulseforge.common.protocol.NatsSubjects;
-import io.pulseforge.common.serde.JsonCodec;
 import io.pulseforge.worker.metrics.MetricPipeline;
 import io.pulseforge.worker.metrics.Sample;
+import io.pulseforge.worker.metrics.SnapshotTransport;
 import io.pulseforge.worker.metrics.StepAggregator;
 import java.time.Duration;
 import java.time.Instant;
@@ -39,7 +37,7 @@ public class MetricAggregatorLoop implements Runnable {
     private final Duration snapshotInterval;
     private final MetricPipeline pipeline;
     private final StepAggregator[] aggregators;
-    private final Connection nats;
+    private final SnapshotTransport transport;
     private final RunExecution execution;
 
     private final AtomicBoolean stopped = new AtomicBoolean();
@@ -52,13 +50,13 @@ public class MetricAggregatorLoop implements Runnable {
             Duration snapshotInterval,
             MetricPipeline pipeline,
             StepSelector stepSelector,
-            Connection nats,
+            SnapshotTransport transport,
             RunExecution execution) {
         this.runId = runId;
         this.workerId = workerId;
         this.snapshotInterval = snapshotInterval;
         this.pipeline = pipeline;
-        this.nats = nats;
+        this.transport = transport;
         this.execution = execution;
         this.aggregators =
                 stepSelector.steps().stream()
@@ -99,6 +97,9 @@ public class MetricAggregatorLoop implements Runnable {
         // Final flush: whatever landed after the last interval still belongs to the run.
         drainRemaining();
         publish(windowStart, Instant.now());
+        // Only after the final snapshot is sent, so a streaming transport does not close its
+        // stream on data it has not shipped yet.
+        transport.runFinished(runId);
         log.debug("Aggregator loop for run {} stopped", runId);
     }
 
@@ -153,12 +154,7 @@ public class MetricAggregatorLoop implements Runnable {
             if (snapshot.isEmpty()) {
                 continue;
             }
-            try {
-                nats.publish(NatsSubjects.METRICS_SNAPSHOTS, JsonCodec.encode(snapshot));
-            } catch (RuntimeException e) {
-                // Losing a snapshot must not kill the run; the ingestor will show the gap.
-                log.error("Failed to publish snapshot for run {} step {}", runId, aggregator.stepName(), e);
-            }
+            transport.send(snapshot);
         }
     }
 

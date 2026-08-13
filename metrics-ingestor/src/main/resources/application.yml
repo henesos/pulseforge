@@ -31,6 +31,11 @@ pulseforge:
     batch-size: 500
     flush-interval: 2s
     queue-capacity: 10000
+    # Both transports listen by default, so a fleet can be migrated one worker at a time
+    # rather than in a flag day.
+    nats-enabled: true
+    grpc-enabled: true
+    grpc-port: 9090
 
 logging:
   level:

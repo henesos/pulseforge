@@ -221,7 +221,8 @@ asked to do the other's job.
 
 | Module             | Responsibility                                                            |
 |--------------------|---------------------------------------------------------------------------|
-| `common`           | Domain model, wire protocol, shared NATS plumbing                          |
+| `common`           | Domain model, wire protocol, protobuf contract, shared NATS plumbing       |
+| `cli`              | CI entry point: runs a scenario and exits with the verdict                 |
 | `control-plane`    | Public REST API; scenario CRUD, run lifecycle, result queries              |
 | `load-worker`      | Consumes run commands, generates HTTP load, aggregates and ships histograms |
 | `metrics-ingestor` | Consumes snapshots, batches them, writes to ClickHouse                     |
@@ -257,6 +258,47 @@ assertions:
 Weights are relative, not percentages, so adding a step does not require rebalancing the others.
 Assertions are evaluated when the run ends and decide its PASS/FAIL verdict — reflected in the
 process exit code so the tool drops into a CI pipeline without a wrapper script.
+
+### CI usage
+
+The CLI turns a run into an exit code, which is the only thing a pipeline needs from a load tester:
+
+```bash
+pulseforge run examples/checkout-flow-baseline.yaml --control-plane http://pulseforge:8080
+```
+
+| Exit | Meaning |
+|------|---------|
+| `0` | every assertion passed on a complete measurement |
+| `1` | an assertion failed — the regression signal |
+| `2` | the run was degraded: a worker was lost, or samples were dropped |
+| `3` | usage error, unreachable control plane, or invalid scenario |
+
+`2` is deliberately distinct from `1`. A degraded run outranks the assertions: reporting PASS for a
+test that lost a shard is exactly the failure this project exists to prevent, and the two cases
+call for different reactions — one is a code regression, the other is infrastructure to fix and a
+reason to re-run.
+
+### Choosing a metric transport
+
+```bash
+METRICS_TRANSPORT=grpc docker compose up -d --scale load-worker=5
+```
+
+Both paths feed the same bounded buffer and the same batching writer in the ingestor, so switching
+transport cannot quietly change how data is persisted — only how it travels.
+
+|  | NATS (default) | gRPC |
+|---|---|---|
+| Coupling | workers need no ingestor address | workers must resolve the ingestor |
+| Hops | worker → broker → ingestor | worker → ingestor |
+| Delivery feedback | none | per-stream accepted/rejected counts |
+| Contract | JSON, checked at runtime | protobuf, checked at compile time |
+| Scaling ingestors | add a subscriber | needs load balancing |
+| Failure mode | broker down stops all metrics | one ingestor down stops one worker's metrics |
+
+The ingestor listens on both at once by default, which is what makes migrating a fleet possible one
+worker at a time rather than in a flag day.
 
 ---
 
@@ -421,7 +463,7 @@ Deliberately out of scope for a portfolio reference implementation:
 | 1 | Gradle multi-module skeleton, compose stack, target service, control-plane status API | ✅ Done |
 | 2 | End to end: YAML parsing, NATS dispatch, open-loop generation, HdrHistogram aggregation, ClickHouse ingestion, merged percentiles, assertion verdict | ✅ Done |
 | 3 | Distributed scaling: atomic shard claiming, two-level Redis liveness, DEGRADED detection | ✅ Done |
-| 4 | gRPC ingestion path, CLI with CI exit codes, Testcontainers integration tests | Next |
+| 4 | gRPC ingestion path, CLI with CI exit codes, Testcontainers integration tests | ✅ Done |
 
 Ramp-up and the assertion engine were originally scheduled for Phase 4 but landed in Phase 2 —
 the arrival-schedule maths needed the ramp anyway, and results without a verdict are only half a
@@ -443,7 +485,23 @@ docker run --rm -u $(id -u):$(id -g) \
 A local JDK 21 works too, via `./gradlew build`.
 
 The unit tests cover the parts where a subtle error would silently corrupt results: the arrival
-schedule's ramp-up integral, scenario and assertion parsing, and the histogram merge.
+schedule's ramp-up integral, scenario and assertion parsing, the histogram merge, and rate
+sharding.
+
+```bash
+./gradlew test               # 32 unit tests, no Docker required
+./gradlew integrationTest    # Testcontainers: real ClickHouse and PostgreSQL
+```
+
+Integration tests are a separate task on purpose — `gradle build` must stay runnable anywhere, and
+a fast unit-test loop is worth more than the convenience of one command.
+
+> **Note:** `integrationTest` needs a Docker daemon whose published ports are reachable from the
+> JVM running the tests. It works from a host JDK. It does **not** work when Gradle itself runs
+> inside a container on Docker Desktop for WSL: Testcontainers publishes ports to the Docker VM's
+> host, which a sibling container cannot reach at either `172.17.0.1` or `host.docker.internal`.
+> The tests in this repository were compiled and wired up but have not been executed in that
+> containerised setup.
 
 ### Tech stack
 

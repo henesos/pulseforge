@@ -19,6 +19,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param connectTimeout        TCP connect budget per request
  * @param requestTimeout        end-to-end budget per request; a request exceeding it is recorded as
  *                              a failure rather than waited on forever
+ * @param metricsTransport      how snapshots reach the ingestor; see {@link MetricsTransport}
+ * @param ingestorGrpcTarget    host:port of the ingestor, used only by the gRPC transport
  */
 @ConfigurationProperties(prefix = "pulseforge.worker")
 public record WorkerProperties(
@@ -28,7 +30,17 @@ public record WorkerProperties(
         int metricQueueCapacity,
         int maxConcurrentRequests,
         Duration connectTimeout,
-        Duration requestTimeout) {
+        Duration requestTimeout,
+        MetricsTransport metricsTransport,
+        String ingestorGrpcTarget) {
+
+    /** Available snapshot transports. */
+    public enum MetricsTransport {
+        /** Publish/subscribe: no coupling to an ingestor address, no delivery acknowledgement. */
+        NATS,
+        /** Direct client-streamed connection: one less hop and per-stream acknowledgement. */
+        GRPC
+    }
 
     public WorkerProperties {
         id = (id == null || id.isBlank()) ? defaultWorkerId() : id;
@@ -38,6 +50,11 @@ public record WorkerProperties(
         maxConcurrentRequests = maxConcurrentRequests <= 0 ? 10_000 : maxConcurrentRequests;
         connectTimeout = connectTimeout == null ? Duration.ofSeconds(5) : connectTimeout;
         requestTimeout = requestTimeout == null ? Duration.ofSeconds(30) : requestTimeout;
+        metricsTransport = metricsTransport == null ? MetricsTransport.NATS : metricsTransport;
+        ingestorGrpcTarget =
+                (ingestorGrpcTarget == null || ingestorGrpcTarget.isBlank())
+                        ? "metrics-ingestor:9090"
+                        : ingestorGrpcTarget;
     }
 
     private static String defaultWorkerId() {

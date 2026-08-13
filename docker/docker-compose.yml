@@ -137,6 +137,9 @@ services:
       dockerfile: docker/Dockerfile
       args:
         MODULE: metrics-ingestor
+    ports:
+      # gRPC ingestion. Published so the transport can be exercised from the host.
+      - "9090:9090"
     environment:
       SPRING_DATASOURCE_URL: jdbc:clickhouse://clickhouse:8123/pulseforge
       PULSEFORGE_NATS_URL: nats://nats:4222
@@ -164,6 +167,9 @@ services:
     environment:
       SPRING_DATA_REDIS_HOST: redis
       PULSEFORGE_NATS_URL: nats://nats:4222
+      # Switch to `grpc` to stream snapshots straight to the ingestor instead of via the bus.
+      PULSEFORGE_WORKER_METRICS_TRANSPORT: "${METRICS_TRANSPORT:-nats}"
+      PULSEFORGE_WORKER_INGESTOR_GRPC_TARGET: metrics-ingestor:9090
       # ZGC keeps generator pauses out of the latency measurements.
       JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -XX:+UseZGC -XX:+ZGenerational"
     healthcheck:

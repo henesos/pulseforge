@@ -11,6 +11,7 @@ import io.pulseforge.worker.coordination.RunLiveness;
 import io.pulseforge.worker.coordination.ShardClaim;
 import io.pulseforge.worker.http.RequestExecutor;
 import io.pulseforge.worker.metrics.MetricPipeline;
+import io.pulseforge.worker.metrics.SnapshotTransport;
 import jakarta.annotation.PreDestroy;
 import java.net.http.HttpClient;
 import java.time.Instant;
@@ -44,6 +45,7 @@ public class WorkerRunCoordinator {
     private final HttpClient httpClient;
     private final ShardClaim shardClaim;
     private final RunLiveness runLiveness;
+    private final SnapshotTransport snapshotTransport;
     private final ConcurrentHashMap<UUID, ActiveRun> activeRuns = new ConcurrentHashMap<>();
     private final AtomicInteger runThreadCounter = new AtomicInteger();
 
@@ -54,12 +56,14 @@ public class WorkerRunCoordinator {
             WorkerProperties properties,
             HttpClient httpClient,
             ShardClaim shardClaim,
-            RunLiveness runLiveness) {
+            RunLiveness runLiveness,
+            SnapshotTransport snapshotTransport) {
         this.nats = nats;
         this.properties = properties;
         this.httpClient = httpClient;
         this.shardClaim = shardClaim;
         this.runLiveness = runLiveness;
+        this.snapshotTransport = snapshotTransport;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -136,7 +140,7 @@ public class WorkerRunCoordinator {
                         properties.snapshotInterval(),
                         pipeline,
                         stepSelector,
-                        nats,
+                        snapshotTransport,
                         execution);
 
         ActiveRun activeRun = new ActiveRun(execution, aggregator, pipeline);

@@ -6,4 +6,5 @@ include(
     "load-worker",
     "metrics-ingestor",
     "target-service",
+    "cli",
 )

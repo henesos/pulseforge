@@ -37,6 +37,10 @@ pulseforge:
     max-concurrent-requests: 10000
     connect-timeout: 5s
     request-timeout: 30s
+    # nats: publish/subscribe, no coupling to an ingestor address, no delivery acknowledgement.
+    # grpc: direct client-streamed connection, one less hop, per-stream acknowledgement.
+    metrics-transport: nats
+    ingestor-grpc-target: metrics-ingestor:9090
 
 logging:
   level:

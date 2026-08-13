@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package pulseforge.v1;
+
+option java_multiple_files = true;
+option java_package = "io.pulseforge.grpc";
+option java_outer_classname = "MetricsProto";
+
+// Second transport for the snapshot stream, alongside NATS.
+//
+// The two exist for different reasons and the choice is a real trade-off, not a preference:
+//
+//   NATS  - publish/subscribe. Workers do not need to know where the ingestor is, ingestors can be
+//           added or restarted without touching the fleet, and a worker never blocks on a slow
+//           consumer. The cost is an extra hop and a broker that must stay up.
+//
+//   gRPC  - a direct client-streamed connection to the ingestor. One less hop, a typed contract
+//           enforced at compile time, HTTP/2 flow control, and per-batch acknowledgement so the
+//           worker learns whether its data actually landed. The cost is coupling: workers must be
+//           able to resolve and reach the ingestor.
+//
+// Selected per worker with `pulseforge.worker.metrics-transport: nats | grpc`.
+service MetricsIngestion {
+
+  // Client-streaming: a worker holds one stream open for the whole run and pushes snapshots as
+  // they are produced, rather than paying connection setup once per second per step.
+  rpc StreamSnapshots(stream HistogramSnapshot) returns (IngestSummary);
+}
+
+// Mirror of io.pulseforge.common.protocol.HistogramSnapshot.
+//
+// Field numbers are the contract: they may be deprecated but never reused, so a worker and an
+// ingestor on different versions can still talk.
+message HistogramSnapshot {
+  string run_id = 1;
+  string worker_id = 2;
+  string step_name = 3;
+
+  // Milliseconds since the epoch, UTC.
+  int64 window_start_millis = 4;
+  int64 window_end_millis = 5;
+
+  uint64 request_count = 6;
+  uint64 error_count = 7;
+
+  // Measurements taken but never enqueued. Reported, never hidden.
+  uint64 dropped_samples = 8;
+
+  // Requests the generator could not issue because the in-flight ceiling was reached.
+  uint64 skipped_requests = 9;
+
+  uint64 min_micros = 10;
+  uint64 max_micros = 11;
+  uint64 sum_micros = 12;
+
+  // HdrHistogram's compressed encoding. Raw bytes rather than base64: the wire is already binary,
+  // so the base64 the NATS path needs would be pure overhead here.
+  bytes histogram = 13;
+}
+
+// Sent once when the stream closes.
+message IngestSummary {
+  uint64 accepted = 1;
+  uint64 rejected = 2;
+}
