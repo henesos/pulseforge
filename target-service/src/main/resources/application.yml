@@ -1,0 +1,39 @@
+spring:
+  application:
+    name: target-service
+  threads:
+    virtual:
+      # The endpoints block on purpose; virtual threads keep the injected delay from turning
+      # into request-queue latency at high arrival rates.
+      enabled: true
+
+server:
+  port: 8081
+  tomcat:
+    max-connections: 20000
+    accept-count: 2000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+pulseforge:
+  target:
+    fast:
+      base-delay: 0ms
+      jitter: 2ms
+    slow:
+      base-delay: 120ms
+      jitter: 60ms
+    flaky:
+      base-delay: 20ms
+      error-rate-percent: 10.0
+
+logging:
+  level:
+    io.pulseforge: INFO

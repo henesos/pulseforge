@@ -1,0 +1,27 @@
+# Reference scenario. `target` uses the compose service name, so the whole run stays inside the
+# project's own network — load is never pointed at a third-party host.
+name: checkout-flow-baseline
+target: http://target-service:8081
+
+duration: 120s
+rampUp: 30s
+
+# Requests per second the generator will try to issue, independent of how fast the target answers.
+# This is an arrival rate, not a virtual-user count. See "Coordinated omission" in the README.
+arrivalRate: 400
+
+steps:
+  - method: GET
+    path: /api/fast
+    weight: 70
+
+  - method: POST
+    path: /api/slow
+    weight: 30
+    body: '{"item":"sku-1"}'
+    headers:
+      Content-Type: application/json
+
+assertions:
+  - p95 < 250ms
+  - errorRate < 1%
