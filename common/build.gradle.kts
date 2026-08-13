@@ -15,4 +15,6 @@ dependencies {
     api("org.springframework.boot:spring-boot-starter")
     api("org.springframework.boot:spring-boot-starter-actuator")
     api(libs.jnats)
+    // Both the worker (produces) and the ingestor (merges) need the same histogram encoding.
+    api(libs.hdrhistogram)
 }
