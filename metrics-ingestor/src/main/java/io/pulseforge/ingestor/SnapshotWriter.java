@@ -28,6 +28,13 @@ import org.springframework.stereotype.Component;
  *       across every worker, then walk the cumulative distribution. Averaging per-worker
  *       percentiles would be far easier and statistically meaningless.
  * </ul>
+ *
+ * <p>ClickHouse gives no transaction spanning the two inserts, so one of them can land without the
+ * other. The order is therefore a correctness decision rather than a stylistic one, and it is
+ * buckets first. Distribution without counters under-reports throughput and shows up as
+ * {@code sum(count) > sum(request_count)} — visible in a number an operator already reads. Counters
+ * without distribution is a percentile silently computed over a subset of the population while
+ * every counter looks complete: a wrong p99 that nothing downstream can detect.
  */
 @Component
 public class SnapshotWriter {
@@ -61,10 +68,41 @@ public class SnapshotWriter {
             return;
         }
         try (Connection connection = dataSource.getConnection()) {
-            writeSnapshots(connection, batch);
             writeBuckets(connection, batch);
+            try {
+                writeSnapshots(connection, batch);
+            } catch (SQLException | RuntimeException e) {
+                // Distinguished from a clean failure because half the batch is now stored. Reported
+                // as "nothing was written", an operator would go looking for missing percentiles
+                // that are in fact present and complete.
+                throw new PartialWriteException(batch.size(), e);
+            }
         }
         log.debug("Wrote {} snapshots to ClickHouse", batch.size());
+    }
+
+    /**
+     * Raised when the distribution landed and the counters did not.
+     *
+     * <p>Not recoverable here: there is no transaction to roll back and no deduplicating retry on a
+     * plain {@code MergeTree}, so re-sending the batch would double-count the buckets. The batch is
+     * lost on purpose, and this type exists so the loss is described accurately.
+     */
+    public static class PartialWriteException extends SQLException {
+
+        private final int snapshotsInBatch;
+
+        PartialWriteException(int snapshotsInBatch, Throwable cause) {
+            super(
+                    "wrote the latency buckets for %d snapshots but not their counters"
+                            .formatted(snapshotsInBatch),
+                    cause);
+            this.snapshotsInBatch = snapshotsInBatch;
+        }
+
+        public int snapshotsInBatch() {
+            return snapshotsInBatch;
+        }
     }
 
     private void writeSnapshots(Connection connection, List<HistogramSnapshot> batch)
@@ -98,7 +136,23 @@ public class SnapshotWriter {
                 if (snapshot.requestCount() == 0) {
                     continue;
                 }
-                Histogram histogram = HistogramCodec.decode(snapshot.histogramBase64());
+                Histogram histogram;
+                try {
+                    histogram = HistogramCodec.decode(snapshot.histogramBase64());
+                } catch (IllegalArgumentException e) {
+                    // One unreadable payload costs its own distribution, not the batch's. Its
+                    // counters are still written below — the requests really happened, so
+                    // throughput and error rate stay right and only the latency is lost. The gap
+                    // shows up as sum(count) < sum(request_count) for exactly this snapshot.
+                    log.error(
+                            "Run {}: histogram from worker {} for step {} could not be decoded; "
+                                    + "its latency is lost while its counters are kept",
+                            snapshot.runId(),
+                            snapshot.workerId(),
+                            snapshot.stepName(),
+                            e);
+                    continue;
+                }
                 UUID runId = snapshot.runId();
                 Timestamp windowStart = Timestamp.from(snapshot.windowStart());
 

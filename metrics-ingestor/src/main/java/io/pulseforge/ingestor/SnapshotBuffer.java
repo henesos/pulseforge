@@ -47,6 +47,7 @@ public class SnapshotBuffer {
     private final LongAdder written = new LongAdder();
     private final LongAdder dropped = new LongAdder();
     private final LongAdder failed = new LongAdder();
+    private final LongAdder partiallyWritten = new LongAdder();
 
     private Thread writerThread;
 
@@ -107,17 +108,28 @@ public class SnapshotBuffer {
             flush(batch);
         }
         log.info(
-                "Writer stopped: {} received, {} written, {} dropped, {} failed",
+                "Writer stopped: {} received, {} written, {} dropped, {} failed, {} partial",
                 received.sum(),
                 written.sum(),
                 dropped.sum(),
-                failed.sum());
+                failed.sum(),
+                partiallyWritten.sum());
     }
 
     private void flush(List<HistogramSnapshot> batch) {
         try {
             writer.write(batch);
             written.add(batch.size());
+        } catch (SnapshotWriter.PartialWriteException e) {
+            // Counted apart from a clean failure because the two are different problems for whoever
+            // reads the run: this batch's latency distribution is stored and complete, and only its
+            // counters are missing, so the run under-reports throughput rather than losing a window.
+            partiallyWritten.add(batch.size());
+            log.error(
+                    "Wrote the buckets but not the counters for {} snapshots; "
+                            + "the run will under-report requests for this window",
+                    batch.size(),
+                    e);
         } catch (Exception e) {
             // A failed batch is lost rather than retried forever: retrying indefinitely would fill
             // the queue and cause drops that look like measurement loss instead of a storage fault.
@@ -152,5 +164,10 @@ public class SnapshotBuffer {
 
     public long failedCount() {
         return failed.sum();
+    }
+
+    /** Batches whose buckets were stored but whose counters were not. */
+    public long partiallyWrittenCount() {
+        return partiallyWritten.sum();
     }
 }
