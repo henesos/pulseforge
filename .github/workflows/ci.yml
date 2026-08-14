@@ -1,0 +1,139 @@
+name: CI
+
+# Three levels of confidence, cheapest first. `unit` is the fast loop; `integration` is the first
+# thing that touches a real database; `e2e` runs the product against itself and gates on the exit
+# code, which is the only contract a pipeline actually consumes.
+on:
+  push:
+    branches: [main, 'fix/**', 'feat/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # `build` rather than `test`: it also compiles the integration sources, so a broken *IT
+      # cannot sit undetected until the slower job runs.
+      - run: ./gradlew build --no-daemon
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: '**/build/reports/tests/test'
+          if-no-files-found: ignore
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Testcontainers needs a daemon whose published ports the JVM can reach. A GitHub runner
+      # gives exactly that; a containerised Gradle on Docker Desktop for WSL does not, which is
+      # why these tests could not be run locally.
+      - run: ./gradlew integrationTest --no-daemon
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: '**/build/reports/tests/integrationTest'
+          if-no-files-found: ignore
+
+  e2e:
+    name: End to end
+    runs-on: ubuntu-latest
+    needs: unit
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: docker
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every image is built from the same Dockerfile with the module as a build arg, and the
+      # module is only selected after the last COPY — so all five share their source layers and
+      # the Gradle dependency cache mount, and the fleet costs barely more than one build.
+      - name: Start the stack
+        run: docker compose up -d --build --scale load-worker=3 --wait --wait-timeout 600
+
+      - name: Report deployment status
+        run: |
+          docker compose ps
+          curl -sf localhost:8080/api/v1/system/status | tee /dev/stderr | grep -q '"status":"UP"'
+
+      - name: Build the CLI image
+        working-directory: .
+        run: docker build -f docker/Dockerfile --build-arg MODULE=cli -t pulseforge-cli:ci .
+
+      # A healthy run must exit 0. This is the contract the README claims and nothing verified.
+      - name: A clean run exits 0
+        working-directory: .
+        run: |
+          set +e
+          docker run --rm --network pulseforge_pulseforge -v "$PWD/examples":/examples \
+            pulseforge-cli:ci run /examples/smoke-test.yaml \
+            --control-plane http://control-plane:8080
+          code=$?
+          set -e
+          echo "exit code: $code"
+          [ "$code" -eq 0 ] || { echo "::error::expected exit 0 for a passing run, got $code"; exit 1; }
+
+      # The case that separates "your code got slower" from "your infrastructure lost a worker".
+      # Killing a shard mid-run must not shorten the run, and must not report success.
+      - name: A run that loses a worker exits 2
+        working-directory: .
+        run: |
+          docker run --rm --network pulseforge_pulseforge -v "$PWD/examples":/examples \
+            pulseforge-cli:ci run /examples/degraded-demo.yaml \
+            --control-plane http://control-plane:8080 &
+          cli=$!
+
+          sleep 20
+          victim=$(docker ps --format '{{.Names}}' | grep load-worker | head -1)
+          echo "killing $victim 20s into a 60s run"
+          docker kill --signal=KILL "$victim"
+
+          set +e
+          wait "$cli"
+          code=$?
+          set -e
+          echo "exit code: $code"
+          [ "$code" -eq 2 ] || { echo "::error::expected exit 2 for a degraded run, got $code"; exit 1; }
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
