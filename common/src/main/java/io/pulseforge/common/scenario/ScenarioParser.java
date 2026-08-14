@@ -11,8 +11,10 @@ import io.pulseforge.common.domain.ScenarioStep;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Turns scenario YAML into a validated {@link Scenario}.
@@ -23,9 +25,11 @@ import java.util.Locale;
  */
 public final class ScenarioParser {
 
+    // Unknown properties are a hard failure: `rampup:` for `rampUp:` would otherwise be dropped
+    // without a word, and the run would apply no ramp at all while reporting success.
     private static final ObjectMapper YAML =
             new ObjectMapper(new YAMLFactory())
-                    .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+                    .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
     private ScenarioParser() {
         throw new AssertionError("utility class");
@@ -84,21 +88,32 @@ public final class ScenarioParser {
             throw new InvalidScenarioException("'steps' must declare at least one request");
         }
         List<ScenarioStep> steps = new ArrayList<>(raw.steps().size());
+        Set<String> names = new HashSet<>();
         for (int i = 0; i < raw.steps().size(); i++) {
             ScenarioYaml.StepYaml step = raw.steps().get(i);
+            ScenarioStep parsed;
             try {
-                steps.add(
+                parsed =
                         new ScenarioStep(
                                 step.name(),
                                 method(step.method()),
                                 step.path(),
                                 step.weight() == null ? 1 : step.weight(),
                                 step.body(),
-                                step.headers()));
+                                step.headers());
+            } catch (InvalidScenarioException e) {
+                // Already carries its own message; only the index is missing.
+                throw new InvalidScenarioException("steps[" + i + "]: " + e.getMessage(), e);
             } catch (IllegalArgumentException | NullPointerException e) {
-                throw new InvalidScenarioException(
-                        "steps[" + i + "]: " + e.getMessage(), e);
+                throw new InvalidScenarioException("steps[" + i + "]: " + e.getMessage(), e);
             }
+            // Results are grouped by step name, so two steps sharing one would be reported as a
+            // single merged row — a step would vanish from the breakdown with no warning.
+            if (!names.add(parsed.name())) {
+                throw new InvalidScenarioException(
+                        "steps[" + i + "]: duplicate step name '" + parsed.name() + "'");
+            }
+            steps.add(parsed);
         }
         return steps;
     }

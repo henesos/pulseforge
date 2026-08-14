@@ -9,6 +9,10 @@ import java.util.Objects;
  * <p>The model is <em>open-loop</em>: {@code arrivalRate} is a request rate the generator tries to
  * honour regardless of how fast the target responds. It is not a virtual-user count. See the
  * coordinated-omission section of the README for why.
+ *
+ * <p>This record only carries and validates the profile. The ramp itself is applied by
+ * {@code ArrivalSchedule} in the worker, which inverts the integral of the rising rate to get each
+ * request's send time — a shape that has to be computed per request, not sampled per instant.
  */
 public record LoadProfile(Duration duration, Duration rampUp, int arrivalRate) {
 
@@ -29,15 +33,4 @@ public record LoadProfile(Duration duration, Duration rampUp, int arrivalRate) {
         }
     }
 
-    /**
-     * Target rate at a given offset into the run. During ramp-up the rate rises linearly from zero
-     * so the target is not hit with the full rate on the first tick.
-     */
-    public double rateAt(Duration elapsed) {
-        if (rampUp.isZero() || elapsed.compareTo(rampUp) >= 0) {
-            return arrivalRate;
-        }
-        double progress = (double) elapsed.toNanos() / rampUp.toNanos();
-        return arrivalRate * progress;
-    }
 }

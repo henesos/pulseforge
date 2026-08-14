@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
@@ -41,6 +42,7 @@ public class MetricAggregatorLoop implements Runnable {
     private final RunExecution execution;
 
     private final AtomicBoolean stopped = new AtomicBoolean();
+    private final CountDownLatch finished = new CountDownLatch(1);
     private long lastDroppedTotal;
     private long lastSkippedTotal;
 
@@ -66,6 +68,16 @@ public class MetricAggregatorLoop implements Runnable {
 
     @Override
     public void run() {
+        try {
+            loop();
+        } finally {
+            // Whoever is waiting on the final flush must be released even if the loop died, or a
+            // failure here would hang the worker's completion path instead of reporting.
+            finished.countDown();
+        }
+    }
+
+    private void loop() {
         Instant windowStart = Instant.now();
         long nextFlushNanos = System.nanoTime() + snapshotInterval.toNanos();
         List<Sample> batch = new ArrayList<>(DRAIN_BATCH);
@@ -84,23 +96,54 @@ public class MetricAggregatorLoop implements Runnable {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
+            } catch (RuntimeException e) {
+                // A failed publish or a malformed sample must not end the loop. Losing this thread
+                // would leave the generator running with nothing recording it, and the run would
+                // still report as though it had been measured.
+                log.error("Aggregator loop for run {} hit an error, continuing", runId, e);
+                batch.clear();
             }
 
             if (System.nanoTime() >= nextFlushNanos) {
                 Instant windowEnd = Instant.now();
-                publish(windowStart, windowEnd);
+                try {
+                    publish(windowStart, windowEnd);
+                } catch (RuntimeException e) {
+                    log.error("Run {}: failed to publish a snapshot window", runId, e);
+                }
                 windowStart = windowEnd;
-                nextFlushNanos = System.nanoTime() + snapshotInterval.toNanos();
+                // Advanced by a whole interval rather than measured from now, so the time spent
+                // publishing does not stretch every subsequent window.
+                nextFlushNanos += snapshotInterval.toNanos();
+                if (System.nanoTime() >= nextFlushNanos) {
+                    nextFlushNanos = System.nanoTime() + snapshotInterval.toNanos();
+                }
             }
         }
 
         // Final flush: whatever landed after the last interval still belongs to the run.
-        drainRemaining();
-        publish(windowStart, Instant.now());
+        try {
+            drainRemaining();
+            publish(windowStart, Instant.now());
+        } catch (RuntimeException e) {
+            log.error("Run {}: final snapshot flush failed", runId, e);
+        }
         // Only after the final snapshot is sent, so a streaming transport does not close its
         // stream on data it has not shipped yet.
         transport.runFinished(runId);
         log.debug("Aggregator loop for run {} stopped", runId);
+    }
+
+    /**
+     * Blocks until the loop has published its final window.
+     *
+     * <p>The worker announces completion only after this returns: the control plane closes the run
+     * on that message, and a report read before the last snapshot shipped is short by one interval.
+     *
+     * @return false if the flush did not complete within {@code timeout}
+     */
+    public boolean awaitFinalFlush(Duration timeout) throws InterruptedException {
+        return finished.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
     private void drainRemaining() {

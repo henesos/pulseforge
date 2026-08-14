@@ -110,18 +110,26 @@ public class RunExecution implements Runnable {
         ScenarioStep step = stepSelector.step(stepIndex);
         issuedRequests.increment();
 
-        requestExecutor
-                .execute(step)
-                .whenComplete(
-                        (response, error) -> {
-                            try {
-                                long latencyMicros = (System.nanoTime() - scheduledNanos) / 1_000;
-                                boolean failed = error != null || response.statusCode() >= 400;
-                                pipeline.offer(new Sample(stepIndex, latencyMicros, failed));
-                            } finally {
-                                inFlightLimit.release();
-                            }
-                        });
+        try {
+            requestExecutor
+                    .execute(step)
+                    .whenComplete(
+                            (response, error) -> {
+                                try {
+                                    long latencyMicros =
+                                            (System.nanoTime() - scheduledNanos) / 1_000;
+                                    boolean failed = error != null || response.statusCode() >= 400;
+                                    pipeline.offer(new Sample(stepIndex, latencyMicros, failed));
+                                } finally {
+                                    inFlightLimit.release();
+                                }
+                            });
+        } catch (RuntimeException e) {
+            // A throw before the future exists never reaches whenComplete, so the permit taken
+            // above would be lost. Enough of those and the generator throttles itself to a halt.
+            inFlightLimit.release();
+            log.error("Run {} shard {}: could not issue a request", command.runId(), shardIndex, e);
+        }
     }
 
     /** Sleeps until the wall-clock start instant the control plane picked for the whole fleet. */

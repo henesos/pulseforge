@@ -3,6 +3,7 @@ package io.pulseforge.common.scenario;
 import io.pulseforge.common.domain.Assertion;
 import io.pulseforge.common.domain.AssertionType;
 import io.pulseforge.common.domain.ComparisonOperator;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -32,7 +33,7 @@ public final class AssertionSyntax {
         if (expression == null || expression.isBlank()) {
             throw new IllegalArgumentException("assertion must not be blank");
         }
-        String normalised = expression.trim().toLowerCase();
+        String normalised = expression.trim().toLowerCase(Locale.ROOT);
 
         Matcher percentile = PERCENTILE.matcher(normalised);
         if (percentile.matches()) {

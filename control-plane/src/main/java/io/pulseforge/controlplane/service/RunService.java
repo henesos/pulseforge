@@ -20,12 +20,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * Starts, tracks and terminates runs.
+ * Starts and tracks runs.
  *
- * <p>The run row is committed <em>before</em> the command is published. If publishing failed after
- * workers had already begun, an orphaned run would be generating load with nothing recording it.
+ * <p>The command is published only once the run row has committed. Publishing inside the
+ * transaction would let a rollback leave the fleet generating load for a run that no row records —
+ * an orphan nothing can attribute, stop, or report on.
+ *
+ * <p>Runs are not closed here. {@link RunWatchdog} owns every terminal transition so that the
+ * settle delay is applied in one place: when the last shard reports, its final snapshots are still
+ * travelling to ClickHouse, and closing the run at that instant would let a caller read results
+ * that are still missing their last interval.
  */
 @Service
 public class RunService {
@@ -84,9 +92,12 @@ public class RunService {
 
         StartRunCommand command =
                 new StartRunCommand(run.getId(), scenario, startAt, workerCount);
-        nats.publish(NatsSubjects.RUN_COMMANDS, JsonCodec.encode(command));
-
         run.markRunning(startAt);
+
+        // Deferred to after the commit on purpose: see the class javadoc. The dispatch lead is what
+        // makes this safe — workers are told to start at an absolute instant a couple of seconds
+        // out, so the commit-then-publish hop costs the schedule nothing.
+        publishAfterCommit(command);
         log.info(
                 "Run {} dispatched: scenario '{}', {} req/s for {}, {} worker(s), starting at {}",
                 run.getId(),
@@ -111,9 +122,11 @@ public class RunService {
     }
 
     /**
-     * Records that a worker finished its shard, and closes the run once every expected shard has
-     * reported. Waiting for the shards rather than the clock is what lets a missing worker be
-     * detected instead of silently producing a short result.
+     * Records that a worker finished its shard. Waiting for the shards rather than the clock is
+     * what lets a missing worker be detected instead of silently producing a short result.
+     *
+     * <p>Reaching the expected count does not close the run — it only starts the settle window that
+     * {@link RunWatchdog} waits out.
      */
     @Transactional
     public void recordWorkerFinished(UUID runId, String workerId) {
@@ -121,15 +134,37 @@ public class RunService {
         if (run == null || run.getStatus().isTerminal()) {
             return;
         }
-        int finished = run.recordWorkerFinished();
-        log.info("Run {}: worker {} finished ({}/{})", runId, workerId, finished, run.getExpectedWorkers());
+        if (!run.recordWorkerFinished(workerId)) {
+            log.debug("Run {}: worker {} already reported, ignoring redelivery", runId, workerId);
+            return;
+        }
+        int finished = run.getFinishedWorkers();
+        log.info(
+                "Run {}: worker {} finished ({}/{})",
+                runId,
+                workerId,
+                finished,
+                run.getExpectedWorkers());
 
         if (finished >= run.getExpectedWorkers()) {
-            // Snapshots for the final interval are still in flight; the settle delay keeps them
-            // from landing after the results have already been read.
-            run.terminate(RunStatus.COMPLETED, null, clock.instant());
-            log.info("Run {} completed", runId);
+            run.markAllShardsReported(clock.instant());
+            log.info(
+                    "Run {}: all {} shards reported; closing after the {} settle delay",
+                    runId,
+                    finished,
+                    properties.settleDelay());
         }
+    }
+
+    private void publishAfterCommit(StartRunCommand command) {
+        byte[] payload = JsonCodec.encode(command);
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        nats.publish(NatsSubjects.RUN_COMMANDS, payload);
+                    }
+                });
     }
 
     @Transactional(readOnly = true)

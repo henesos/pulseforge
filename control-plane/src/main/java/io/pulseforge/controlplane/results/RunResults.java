@@ -33,8 +33,12 @@ public record RunResults(
         int workers,
         List<StepResult> steps) {
 
-    /** True when the measurement itself is suspect, regardless of whether assertions passed. */
+    /**
+     * True when the measurement is sound — nothing was dropped and nothing was skipped — regardless
+     * of whether the assertions passed. False means the percentiles above describe an incomplete
+     * population, which is a reason to re-run rather than to trust the verdict.
+     */
     public boolean isComplete() {
-        return droppedSamples == 0 && skippedRequests == 0;
+        return totalRequests > 0 && droppedSamples == 0 && skippedRequests == 0;
     }
 }

@@ -1,6 +1,7 @@
 package io.pulseforge.common.domain;
 
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * A pass/fail condition evaluated once the run has finished.
@@ -18,12 +19,19 @@ import java.util.Objects;
 public record Assertion(
         AssertionType type, double parameter, ComparisonOperator operator, double threshold) {
 
+    /**
+     * The percentiles a result set can answer. Anything else is refused here, at submission, rather
+     * than at evaluation: a scenario asserting {@code p99.9} would otherwise be accepted, run for
+     * its full duration, and only then fail — at 3am, having already cost the run.
+     */
+    private static final Set<Double> ANSWERABLE_PERCENTILES = Set.of(50d, 95d, 99d);
+
     public Assertion {
         Objects.requireNonNull(type, "type must not be null");
         Objects.requireNonNull(operator, "operator must not be null");
-        if (type == AssertionType.PERCENTILE && (parameter <= 0 || parameter >= 100)) {
+        if (type == AssertionType.PERCENTILE && !ANSWERABLE_PERCENTILES.contains(parameter)) {
             throw new IllegalArgumentException(
-                    "percentile must be in (0, 100), was " + parameter);
+                    "assertions support p50, p95 and p99; got p" + trimTrailingZero(parameter));
         }
     }
 

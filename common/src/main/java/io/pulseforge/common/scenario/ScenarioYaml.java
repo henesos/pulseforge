@@ -1,6 +1,5 @@
 package io.pulseforge.common.scenario;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import java.util.List;
 import java.util.Map;
 
@@ -11,8 +10,10 @@ import java.util.Map;
  * 250ms"}) while the domain model carries real {@link java.time.Duration} and
  * {@link io.pulseforge.common.domain.Assertion} values. Keeping them separate means a YAML change
  * cannot reach into the domain, and the domain stays free of Jackson annotations.
+ *
+ * <p>Unknown properties are rejected, not ignored. A misspelled key would otherwise be dropped in
+ * silence and the run would measure a different scenario than the file describes.
  */
-@JsonIgnoreProperties(ignoreUnknown = true)
 record ScenarioYaml(
         String name,
         String target,
@@ -22,7 +23,6 @@ record ScenarioYaml(
         List<StepYaml> steps,
         List<String> assertions) {
 
-    @JsonIgnoreProperties(ignoreUnknown = true)
     record StepYaml(
             String name,
             String method,
