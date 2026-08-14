@@ -5,6 +5,7 @@ import io.pulseforge.common.protocol.StartRunCommand;
 import io.pulseforge.worker.http.RequestExecutor;
 import io.pulseforge.worker.metrics.MetricPipeline;
 import io.pulseforge.worker.metrics.Sample;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.Semaphore;
@@ -41,6 +42,7 @@ public class RunExecution implements Runnable {
     private final MetricPipeline pipeline;
     private final Semaphore inFlightLimit;
     private final int maxConcurrentRequests;
+    private final Clock clock;
 
     private final AtomicBoolean stopped = new AtomicBoolean();
     private final LongAdder issuedRequests = new LongAdder();
@@ -53,7 +55,8 @@ public class RunExecution implements Runnable {
             StepSelector stepSelector,
             RequestExecutor requestExecutor,
             MetricPipeline pipeline,
-            int maxConcurrentRequests) {
+            int maxConcurrentRequests,
+            Clock clock) {
         this.command = command;
         this.shardIndex = shardIndex;
         this.schedule = schedule;
@@ -62,6 +65,7 @@ public class RunExecution implements Runnable {
         this.pipeline = pipeline;
         this.maxConcurrentRequests = maxConcurrentRequests;
         this.inFlightLimit = new Semaphore(maxConcurrentRequests);
+        this.clock = clock;
     }
 
     @Override
@@ -134,7 +138,7 @@ public class RunExecution implements Runnable {
 
     /** Sleeps until the wall-clock start instant the control plane picked for the whole fleet. */
     private long alignToStart() {
-        Duration untilStart = Duration.between(Instant.now(), command.startAt());
+        Duration untilStart = Duration.between(clock.instant(), command.startAt());
         if (untilStart.isPositive()) {
             try {
                 Thread.sleep(untilStart.toMillis(), untilStart.toNanosPart() % 1_000_000);

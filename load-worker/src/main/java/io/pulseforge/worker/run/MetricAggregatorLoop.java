@@ -5,6 +5,7 @@ import io.pulseforge.worker.metrics.MetricPipeline;
 import io.pulseforge.worker.metrics.Sample;
 import io.pulseforge.worker.metrics.SnapshotTransport;
 import io.pulseforge.worker.metrics.StepAggregator;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -40,6 +41,7 @@ public class MetricAggregatorLoop implements Runnable {
     private final StepAggregator[] aggregators;
     private final SnapshotTransport transport;
     private final RunExecution execution;
+    private final Clock clock;
 
     private final AtomicBoolean stopped = new AtomicBoolean();
     private final CountDownLatch finished = new CountDownLatch(1);
@@ -56,13 +58,15 @@ public class MetricAggregatorLoop implements Runnable {
             MetricPipeline pipeline,
             StepSelector stepSelector,
             SnapshotTransport transport,
-            RunExecution execution) {
+            RunExecution execution,
+            Clock clock) {
         this.runId = runId;
         this.workerId = workerId;
         this.snapshotInterval = snapshotInterval;
         this.pipeline = pipeline;
         this.transport = transport;
         this.execution = execution;
+        this.clock = clock;
         this.aggregators =
                 stepSelector.steps().stream()
                         .map(step -> new StepAggregator(step.name()))
@@ -81,7 +85,7 @@ public class MetricAggregatorLoop implements Runnable {
     }
 
     private void loop() {
-        Instant windowStart = Instant.now();
+        Instant windowStart = clock.instant();
         long nextFlushNanos = System.nanoTime() + snapshotInterval.toNanos();
         List<Sample> batch = new ArrayList<>(DRAIN_BATCH);
 
@@ -108,7 +112,7 @@ public class MetricAggregatorLoop implements Runnable {
             }
 
             if (System.nanoTime() >= nextFlushNanos) {
-                Instant windowEnd = Instant.now();
+                Instant windowEnd = clock.instant();
                 try {
                     publish(windowStart, windowEnd);
                 } catch (RuntimeException e) {
@@ -127,7 +131,7 @@ public class MetricAggregatorLoop implements Runnable {
         // Final flush: whatever landed after the last interval still belongs to the run.
         try {
             drainRemaining();
-            publish(windowStart, Instant.now());
+            publish(windowStart, clock.instant());
         } catch (RuntimeException e) {
             log.error("Run {}: final snapshot flush failed", runId, e);
         }

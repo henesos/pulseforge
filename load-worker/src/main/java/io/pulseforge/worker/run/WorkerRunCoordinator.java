@@ -16,6 +16,7 @@ import jakarta.annotation.PreDestroy;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -49,6 +50,7 @@ public class WorkerRunCoordinator {
     private final ShardClaim shardClaim;
     private final RunLiveness runLiveness;
     private final SnapshotTransport snapshotTransport;
+    private final Clock clock;
     private final ConcurrentHashMap<UUID, ActiveRun> activeRuns = new ConcurrentHashMap<>();
 
     private Dispatcher dispatcher;
@@ -59,13 +61,15 @@ public class WorkerRunCoordinator {
             HttpClient httpClient,
             ShardClaim shardClaim,
             RunLiveness runLiveness,
-            SnapshotTransport snapshotTransport) {
+            SnapshotTransport snapshotTransport,
+            Clock clock) {
         this.nats = nats;
         this.properties = properties;
         this.httpClient = httpClient;
         this.shardClaim = shardClaim;
         this.runLiveness = runLiveness;
         this.snapshotTransport = snapshotTransport;
+        this.clock = clock;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -142,7 +146,8 @@ public class WorkerRunCoordinator {
                         stepSelector,
                         requestExecutor,
                         pipeline,
-                        properties.maxConcurrentRequests());
+                        properties.maxConcurrentRequests(),
+                        clock);
 
         MetricAggregatorLoop aggregator =
                 new MetricAggregatorLoop(
@@ -152,7 +157,8 @@ public class WorkerRunCoordinator {
                         pipeline,
                         stepSelector,
                         snapshotTransport,
-                        execution);
+                        execution,
+                        clock);
 
         ActiveRun activeRun = new ActiveRun(execution, aggregator, pipeline);
         activeRuns.put(command.runId(), activeRun);
@@ -220,7 +226,7 @@ public class WorkerRunCoordinator {
                         command.runId(),
                         properties.id(),
                         shardIndex,
-                        Instant.now(),
+                        clock.instant(),
                         activeRun.execution().issuedRequests(),
                         activeRun.execution().skippedRequests(),
                         activeRun.pipeline().droppedSamples());
