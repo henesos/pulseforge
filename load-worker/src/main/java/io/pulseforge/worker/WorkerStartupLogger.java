@@ -11,8 +11,8 @@ import org.springframework.stereotype.Component;
  * Announces the worker's identity once at startup.
  *
  * <p>Workers are scaled with {@code --scale}, so the only way to tell them apart in aggregated
- * container logs is the id they claim here. Phase 2 replaces this with an actual subscription to
- * the run-command subject.
+ * container logs is the id they claim here. Run subscription itself lives in
+ * {@code WorkerRunCoordinator}; this only names the process.
  */
 @Component
 public class WorkerStartupLogger {
