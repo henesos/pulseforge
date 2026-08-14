@@ -3,6 +3,7 @@ package io.pulseforge.controlplane;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.nats.client.Connection;
 import io.pulseforge.common.domain.RunStatus;
 import io.pulseforge.common.domain.Scenario;
 import io.pulseforge.common.scenario.ScenarioParser;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -28,9 +30,16 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * Verifies the schema against a real PostgreSQL: the Flyway migration applies, the JPA mapping
  * matches it, and the constraints that protect run integrity actually exist in the database rather
  * than only in Java.
+ *
+ * <p>The NATS connection is mocked away rather than left to the slice. {@code @DataJpaTest} narrows
+ * component scanning but still processes the {@code @Import} on {@link ControlPlaneApplication},
+ * which builds a real client with {@code maxReconnects(-1)} — deliberate in production, fatal here:
+ * with no bus to reach, the context blocks forever instead of failing. That is invisible on a
+ * developer machine with the compose stack up, because the client simply connects to it.
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@MockBean(Connection.class)
 @Testcontainers
 class ScenarioPersistenceIT {
 
