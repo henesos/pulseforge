@@ -33,9 +33,18 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @Testcontainers
 class ClickHousePercentileIT {
 
+    // Credentials are set explicitly rather than left to Testcontainers, whose default is the
+    // `default` user with an empty password — a combination this server version rejects outright
+    // with AUTHENTICATION_FAILED before the wait strategy can ever connect. These are the same
+    // values docker-compose gives the real ClickHouse, access management included, so the test
+    // exercises the privileges the deployment actually grants.
     @Container
     static final ClickHouseContainer CLICKHOUSE =
-            new ClickHouseContainer("clickhouse/clickhouse-server:24.8-alpine");
+            new ClickHouseContainer("clickhouse/clickhouse-server:24.8-alpine")
+                    .withUsername("pulseforge")
+                    .withPassword("pulseforge")
+                    .withDatabaseName("pulseforge")
+                    .withEnv("CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT", "1");
 
     private static HikariDataSource dataSource;
     private static SnapshotWriter writer;
