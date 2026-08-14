@@ -12,7 +12,6 @@ import io.pulseforge.controlplane.persistence.TestRunEntity;
 import io.pulseforge.controlplane.persistence.TestRunRepository;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -175,11 +174,6 @@ public class RunService {
     @Transactional(readOnly = true)
     public List<TestRunEntity> findAll() {
         return runs.findAll();
-    }
-
-    /** How long a caller should wait after completion before reading results. */
-    public Duration settleDelay() {
-        return properties.settleDelay();
     }
 
     public static class RunNotFoundException extends RuntimeException {
