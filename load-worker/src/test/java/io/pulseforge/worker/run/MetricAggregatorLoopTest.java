@@ -14,7 +14,11 @@ import io.pulseforge.common.protocol.HistogramSnapshot;
 import io.pulseforge.worker.metrics.MetricPipeline;
 import io.pulseforge.worker.metrics.Sample;
 import io.pulseforge.worker.metrics.SnapshotTransport;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -44,9 +48,13 @@ class MetricAggregatorLoopTest {
     private static final UUID RUN_ID = UUID.randomUUID();
     private static final String WORKER_ID = "worker-1";
     private static final Duration NO_PERIODIC_FLUSH = Duration.ofHours(1);
+    private static final Instant START = Instant.parse("2026-01-01T00:00:00Z");
+    /** One clock read, one second. Every window the loop publishes is exactly this long. */
+    private static final Duration STEP = Duration.ofSeconds(1);
 
     private final RecordingTransport transport = new RecordingTransport();
     private final RunExecution execution = mock(RunExecution.class);
+    private final SteppingClock clock = new SteppingClock(START, STEP);
 
     @Test
     @DisplayName("samples that arrive after the last interval still reach the report")
@@ -98,6 +106,21 @@ class MetricAggregatorLoopTest {
                 .as("repeating the counter per step makes a SUM over the run report 2x the truth")
                 .isZero();
         assertThat(transport.snapshotFor("checkout").skippedRequests()).isZero();
+    }
+
+    @Test
+    @DisplayName("a window is the span the clock reported, not whenever the thread got there")
+    void windowBoundsComeFromTheClock() {
+        MetricPipeline pipeline = new MetricPipeline(64);
+        pipeline.offer(new Sample(0, 1_200, false));
+
+        drainAndPublish(loopOver(pipeline, NO_PERIODIC_FLUSH));
+
+        HistogramSnapshot snapshot = transport.snapshotFor("list-products");
+        assertThat(snapshot.windowStart())
+                .as("which window a measurement is filed under is the clock's answer, and now the test's")
+                .isEqualTo(START);
+        assertThat(snapshot.windowEnd()).isEqualTo(START.plus(STEP));
     }
 
     @Test
@@ -216,6 +239,12 @@ class MetricAggregatorLoopTest {
                 .isEqualTo(5);
         assertThat(sent).allSatisfy(snapshot -> assertThat(snapshot.requestCount()).isLessThan(5));
 
+        assertThat(sent)
+                .as("a window is one snapshot interval, however long the thread actually took")
+                .allSatisfy(
+                        snapshot ->
+                                assertThat(Duration.between(snapshot.windowStart(), snapshot.windowEnd()))
+                                        .isEqualTo(STEP));
         for (int i = 1; i < sent.size(); i++) {
             assertThat(sent.get(i).windowStart())
                     .as("overlapping windows would count the same second of load twice")
@@ -253,7 +282,14 @@ class MetricAggregatorLoopTest {
 
     private MetricAggregatorLoop loopOver(MetricPipeline pipeline, Duration interval) {
         return new MetricAggregatorLoop(
-                RUN_ID, WORKER_ID, interval, pipeline, new StepSelector(scenario()), transport, execution);
+                RUN_ID,
+                WORKER_ID,
+                interval,
+                pipeline,
+                new StepSelector(scenario()),
+                transport,
+                execution,
+                clock);
     }
 
     private static Scenario scenario() {
@@ -265,6 +301,38 @@ class MetricAggregatorLoopTest {
                         new ScenarioStep("list-products", HttpMethod.GET, "/products", 1, null, null),
                         new ScenarioStep("checkout", HttpMethod.POST, "/checkout", 1, null, null)),
                 List.of());
+    }
+
+    /**
+     * Advances by a fixed step on every read, so the loop's window boundaries are decided here
+     * rather than by how the thread happened to be scheduled.
+     */
+    private static final class SteppingClock extends Clock {
+
+        private final Duration step;
+        private volatile Instant now;
+
+        private SteppingClock(Instant start, Duration step) {
+            this.now = start;
+            this.step = step;
+        }
+
+        @Override
+        public Instant instant() {
+            Instant current = now;
+            now = current.plus(step);
+            return current;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
     }
 
     private static final class RecordingTransport implements SnapshotTransport {
