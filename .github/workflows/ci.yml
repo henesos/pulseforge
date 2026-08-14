@@ -49,6 +49,11 @@ jobs:
     # Testcontainers pulls real images; a registry stall must fail the job rather than sit on a
     # runner until the six-hour ceiling.
     timeout-minutes: 20
+    env:
+      # A runner is thrown away after the job, so there is nothing for the resource reaper to
+      # clean up — and its socket handshake is a known way for container startup to block with no
+      # timeout and no output, which is exactly how this job first failed.
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
     steps:
       - uses: actions/checkout@v5
 
@@ -63,7 +68,9 @@ jobs:
       # Testcontainers needs a daemon whose published ports the JVM can reach. A GitHub runner
       # gives exactly that; a containerised Gradle on Docker Desktop for WSL does not, which is
       # why these tests could not be run locally.
-      - run: ./gradlew integrationTest --no-daemon
+      # `--info` until these two files have a green run on record: the task logs only completed
+      # tests, so a hang during container startup otherwise produces no output at all to read.
+      - run: ./gradlew integrationTest --no-daemon --info
 
       - name: Publish test report
         if: always()
