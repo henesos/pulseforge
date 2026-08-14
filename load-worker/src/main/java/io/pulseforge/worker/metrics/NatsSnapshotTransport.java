@@ -25,9 +25,12 @@ public class NatsSnapshotTransport implements SnapshotTransport {
     }
 
     @Override
-    public void send(HistogramSnapshot snapshot) {
+    public boolean send(HistogramSnapshot snapshot) {
         try {
             nats.publish(NatsSubjects.METRICS_SNAPSHOTS, JsonCodec.encode(snapshot));
+            // True means "handed to the client", not "stored". Fire and forget cannot promise more,
+            // and claiming otherwise here would be worse than admitting the limit.
+            return true;
         } catch (RuntimeException e) {
             // Losing a snapshot must not kill the run; the gap shows up in the results.
             log.error(
@@ -35,6 +38,7 @@ public class NatsSnapshotTransport implements SnapshotTransport {
                     snapshot.runId(),
                     snapshot.stepName(),
                     e);
+            return false;
         }
     }
 

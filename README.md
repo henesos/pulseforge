@@ -504,6 +504,17 @@ Deliberately out of scope for a portfolio reference implementation:
 - **gRPC ingestion is single-endpoint.** Workers dial one ingestor address with no client-side load
   balancing, so scaling ingestors horizontally needs a proxy in front. The NATS path scales by
   simply adding a subscriber.
+- **A congested gRPC stream costs a window, not the worker's heap.** `onNext` on a stream gRPC is
+  not ready to write buffers inside the client without limit, so an ingestor slower than the fleet
+  would be paid for in the worker's memory — and a load generator collecting garbage under memory
+  pressure distorts the latency it is measuring. Blocking is not an option either: the send happens
+  on the thread that records samples. So the window is dropped and its measurements are reported as
+  dropped samples, along with any counters it was carrying.
+- **The ingestor's `rejected` count is logged, not reported.** The gRPC summary arrives when the
+  stream half-closes, after the final snapshot has already been shipped, and it counts snapshots
+  rather than measurements — the worker cannot know how many requests were inside the ones the
+  ingestor threw away. Attributing ingestor-side loss to a run belongs on the ingestor, which still
+  holds the snapshot when it drops it.
 - **The two ingest tables are written without a transaction.** ClickHouse offers none spanning
   them, so a failure between the inserts can leave a batch half-stored. The order is chosen so the
   survivable half is the distribution: buckets are written first, and a run that hits this

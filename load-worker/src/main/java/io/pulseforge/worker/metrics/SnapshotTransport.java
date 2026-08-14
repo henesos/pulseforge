@@ -15,8 +15,14 @@ import io.pulseforge.common.protocol.HistogramSnapshot;
  */
 public interface SnapshotTransport {
 
-    /** Ships one snapshot. Implementations report failure by logging, never by throwing. */
-    void send(HistogramSnapshot snapshot);
+    /**
+     * Ships one snapshot. Implementations report failure by logging, never by throwing.
+     *
+     * @return false if the snapshot did not leave this worker. The caller owns the counters the
+     *     snapshot was carrying, so it needs to know: a lost window whose running-total deltas were
+     *     treated as delivered subtracts those counts from the run's report permanently.
+     */
+    boolean send(HistogramSnapshot snapshot);
 
     /** Called once when a run ends, so a streaming transport can close its stream cleanly. */
     default void runFinished(java.util.UUID runId) {

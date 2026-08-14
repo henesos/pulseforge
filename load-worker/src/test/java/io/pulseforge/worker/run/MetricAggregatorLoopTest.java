@@ -56,7 +56,7 @@ class MetricAggregatorLoopTest {
         pipeline.offer(new Sample(0, 2_400, true));
         pipeline.offer(new Sample(1, 800, false));
 
-        runToCompletion(loopOver(pipeline, NO_PERIODIC_FLUSH));
+        drainAndPublish(loopOver(pipeline, NO_PERIODIC_FLUSH));
 
         assertThat(transport.snapshotFor("list-products").requestCount()).isEqualTo(2);
         assertThat(transport.snapshotFor("list-products").errorCount()).isEqualTo(1);
@@ -69,7 +69,7 @@ class MetricAggregatorLoopTest {
         MetricPipeline pipeline = new MetricPipeline(64);
         pipeline.offer(new Sample(0, 1_200, false));
 
-        runToCompletion(loopOver(pipeline, NO_PERIODIC_FLUSH));
+        drainAndPublish(loopOver(pipeline, NO_PERIODIC_FLUSH));
 
         assertThat(transport.finishedRunId).isEqualTo(RUN_ID);
         assertThat(transport.sendsBeforeFinish)
@@ -89,7 +89,7 @@ class MetricAggregatorLoopTest {
         }
         when(execution.skippedRequests()).thenReturn(7L);
 
-        runToCompletion(loopOver(pipeline, NO_PERIODIC_FLUSH));
+        drainAndPublish(loopOver(pipeline, NO_PERIODIC_FLUSH));
 
         assertThat(pipeline.droppedSamples()).isEqualTo(3);
         assertThat(transport.snapshotFor("list-products").droppedSamples()).isEqualTo(3);
@@ -101,11 +101,71 @@ class MetricAggregatorLoopTest {
     }
 
     @Test
+    @DisplayName("a window the transport refused is not silently deducted from the run")
+    void countersSurviveAWindowThatCouldNotBeSent() {
+        // 6 measurements taken, a queue that holds 2: 4 rejected at the queue, 2 recorded.
+        MetricPipeline pipeline = new MetricPipeline(2);
+        for (int i = 0; i < 6; i++) {
+            pipeline.offer(new Sample(0, 1_000, false));
+        }
+        when(execution.skippedRequests()).thenReturn(7L);
+        MetricAggregatorLoop loop = loopOver(pipeline, NO_PERIODIC_FLUSH);
+
+        transport.refuseSends = true;
+        drainAndPublish(loop);
+        assertThat(transport.sent).isEmpty();
+
+        transport.refuseSends = false;
+        pipeline.offer(new Sample(0, 1_000, false));
+        drainAndPublish(loop);
+
+        HistogramSnapshot carried = transport.snapshotFor("list-products");
+        assertThat(carried.droppedSamples())
+                .as("4 the queue rejected, plus the 2 that died with the window nobody received")
+                .isEqualTo(6);
+        assertThat(carried.skippedRequests())
+                .as("a delta is true once; published into a lost window it is gone for good")
+                .isEqualTo(7);
+        assertThat(carried.requestCount() + carried.droppedSamples())
+                .as("7 measurements were taken and all 7 are accounted for")
+                .isEqualTo(7);
+    }
+
+    @Test
+    @DisplayName("a carried counter is handed over once, not repeated every window after")
+    void carriedCountersAreNotRepublished() {
+        MetricPipeline pipeline = new MetricPipeline(2);
+        for (int i = 0; i < 6; i++) {
+            pipeline.offer(new Sample(0, 1_000, false));
+        }
+        when(execution.skippedRequests()).thenReturn(7L);
+        MetricAggregatorLoop loop = loopOver(pipeline, NO_PERIODIC_FLUSH);
+
+        transport.refuseSends = true;
+        drainAndPublish(loop);
+
+        transport.refuseSends = false;
+        pipeline.offer(new Sample(0, 1_000, false));
+        drainAndPublish(loop);
+
+        pipeline.offer(new Sample(0, 1_000, false));
+        drainAndPublish(loop);
+
+        assertThat(transport.sent).hasSize(2);
+        HistogramSnapshot third = transport.sent.get(1);
+        assertThat(third.droppedSamples())
+                .as("re-reporting the carry would inflate the run's dropped count every second")
+                .isZero();
+        assertThat(third.skippedRequests()).isZero();
+        assertThat(third.requestCount()).isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("a window with no traffic and nothing to admit to is not sent at all")
     void emptyWindowsAreNotPublished() {
         MetricAggregatorLoop loop = loopOver(new MetricPipeline(64), NO_PERIODIC_FLUSH);
 
-        runToCompletion(loop);
+        drainAndPublish(loop);
 
         assertThat(transport.sent)
                 .as("an idle worker would otherwise publish one message per step per second")
@@ -170,7 +230,7 @@ class MetricAggregatorLoopTest {
         pipeline.offer(new Sample(0, 1_000, false));
         pipeline.offer(new Sample(0, 1_900, false));
 
-        runToCompletion(loopOver(pipeline, NO_PERIODIC_FLUSH));
+        drainAndPublish(loopOver(pipeline, NO_PERIODIC_FLUSH));
 
         HistogramSnapshot snapshot = transport.snapshotFor("list-products");
         assertThat(snapshot.minMicros()).isEqualTo(1_000);
@@ -181,8 +241,12 @@ class MetricAggregatorLoopTest {
         assertThat(HistogramCodec.decode(snapshot.histogramBase64()).getTotalCount()).isEqualTo(2);
     }
 
-    /** Stops the loop before it starts, so {@code run()} takes the final-flush path once. */
-    private static void runToCompletion(MetricAggregatorLoop loop) {
+    /**
+     * Stops the loop before it starts, so {@code run()} takes the final-flush path exactly once:
+     * one drain, one publish, no timer involved. Called twice, it gives two consecutive windows
+     * with nothing depending on wall-clock timing.
+     */
+    private static void drainAndPublish(MetricAggregatorLoop loop) {
         loop.stop();
         loop.run();
     }
@@ -209,10 +273,15 @@ class MetricAggregatorLoopTest {
         private volatile UUID finishedRunId;
         private volatile int sendsBeforeFinish = -1;
         private volatile boolean failOnFinish;
+        private volatile boolean refuseSends;
 
         @Override
-        public void send(HistogramSnapshot snapshot) {
+        public boolean send(HistogramSnapshot snapshot) {
+            if (refuseSends) {
+                return false;
+            }
             sent.add(snapshot);
+            return true;
         }
 
         @Override
