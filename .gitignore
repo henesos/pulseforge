@@ -14,3 +14,8 @@ bin/
 
 # Personal tool settings, not team configuration.
 .claude/settings.local.json
+
+# Local agent tooling: scaffolding for how the work is done, not part of the product.
+.claude/
+_bmad/
+_bmad-output/
