@@ -9,7 +9,11 @@ plugins {
 
 allprojects {
     group = "io.pulseforge"
-    version = "0.1.0"
+    // Kept in step with `pulseforge.version` in control-plane's application.yml, which is what
+    // /api/v1/system/status reports. The two drifted once — the service announced 0.2.0 while the
+    // jars said 0.1.0 — and an operator comparing a deployed version against an artifact had no
+    // way to tell which was lying.
+    version = "0.2.0"
 }
 
 // The `libs` accessor is not registered on subprojects while `subprojects {}` is being

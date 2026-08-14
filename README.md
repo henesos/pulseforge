@@ -8,9 +8,10 @@ This is a reference implementation built to demonstrate distributed-systems desi
 production product. The interesting parts are the measurement decisions, not the feature list —
 see [Design Decisions](#design-decisions).
 
-> **Status: Phase 3 of 4 complete — distributed and fault-aware.** Load is sharded across a scaled
-> worker fleet, percentiles are merged globally, and a worker that dies mid-run turns the result
-> DEGRADED instead of quietly shortening it. See [Roadmap](#roadmap).
+> **Status: all four phases complete.** Load is sharded across a scaled worker fleet, percentiles
+> are merged globally, a worker that dies mid-run turns the result DEGRADED instead of quietly
+> shortening it, and CI runs the product against itself and gates on the CLI's exit code. See
+> [Roadmap](#roadmap).
 
 ---
 
@@ -276,7 +277,7 @@ pulseforge run examples/checkout-flow-baseline.yaml --control-plane http://pulse
 |------|---------|
 | `0` | every assertion passed on a complete measurement |
 | `1` | an assertion failed — the regression signal |
-| `2` | the run was degraded: a worker was lost, or samples were dropped |
+| `2` | the measurement is not trustworthy: a worker was lost, samples were dropped, or measurements never reached storage |
 | `3` | usage error, unreachable control plane, or invalid scenario |
 
 `2` is deliberately distinct from `1`, and this is the case that shows why. A worker was SIGKILLed
@@ -332,7 +333,7 @@ switching transport cannot quietly change how data is persisted, only how it tra
 |---|---|---|
 | Coupling | workers need no ingestor address | workers must resolve the ingestor |
 | Hops | worker → broker → ingestor | worker → ingestor |
-| Delivery feedback | none | per-stream accepted/rejected counts |
+| Delivery feedback | none | per-stream accepted/rejected counts, logged rather than reported (see Known Limitations) |
 | Contract | JSON, checked at runtime | protobuf, checked at compile time |
 | Scaling ingestors | add a subscriber | needs load balancing |
 | Failure mode | broker down stops all metrics | one ingestor down stops one worker's metrics |
@@ -608,22 +609,31 @@ toolchains match` rather than fetching one.
 
 The unit tests cover the parts where a subtle error would silently corrupt results: the arrival
 schedule's ramp-up integral, scenario and assertion parsing, the histogram merge, rate sharding,
-the assertion-to-measurement mapping behind the verdict, and completion accounting.
+the assertion-to-measurement mapping behind the verdict, completion accounting, the watchdog's
+detect-but-don't-terminate state machine, the aggregator's window and delta arithmetic, gRPC flow
+control against a real server, and what the run report says when measurements go missing.
+
+A test here is not finished until it has been mutation-checked: break the behaviour it claims to
+hold, and confirm that test — and only that test — fails. Several tests that passed for the wrong
+reason were found that way.
 
 ```bash
-./gradlew test               # 41 unit tests, no Docker required
-./gradlew integrationTest    # Testcontainers: real ClickHouse and PostgreSQL
+./gradlew test               # 85 unit tests, no Docker required
+./gradlew integrationTest    # Testcontainers: real ClickHouse, PostgreSQL and Redis
 ```
 
 Integration tests are a separate task on purpose — `gradle build` must stay runnable anywhere, and
 a fast unit-test loop is worth more than the convenience of one command.
 
 > **Note:** `integrationTest` needs a Docker daemon whose published ports are reachable from the
-> JVM running the tests. It works from a host JDK and on a CI runner. It does **not** work when
-> Gradle itself runs inside a container on Docker Desktop for WSL: Testcontainers publishes ports
-> to the Docker VM's host, which a sibling container cannot reach at either `172.17.0.1` or
-> `host.docker.internal`. That is what CI is for — the workflow runs `integrationTest` on every
-> push, so the environment that cannot run them locally is not the environment that gates them.
+> JVM running the tests. From a host JDK — including WSL with Docker Desktop running — the whole
+> suite runs locally; set `TESTCONTAINERS_RYUK_DISABLED=true` as CI does, since the resource
+> reaper's socket handshake is a known way for container startup to hang with no output. It does
+> **not** work when Gradle itself runs inside a container on Docker Desktop for WSL: Testcontainers
+> publishes ports to the Docker VM's host, which a sibling container cannot reach at either
+> `172.17.0.1` or `host.docker.internal`. The workflow runs `integrationTest` on every push
+> regardless, so the environment that cannot run them locally is never the environment that gates
+> them.
 
 ### Continuous integration
 

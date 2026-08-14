@@ -39,6 +39,9 @@ management:
       enabled: true
 
 pulseforge:
+  # Reported by /api/v1/system/status. Must match `version` in the root build.gradle.kts, which
+  # stamps the jars — a service announcing a version its artifacts do not carry is worse than no
+  # version at all.
   version: 0.2.0
   run:
     # Lead time so every worker has the command before the shared start instant arrives.
