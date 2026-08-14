@@ -494,6 +494,16 @@ Deliberately out of scope for a portfolio reference implementation:
 - **No stateful scenarios.** No cookie jars, no correlation of a response value into the next
   request, no login flows. Steps are independent and weighted.
 - **In-memory run state.** Redis persistence is off; a Redis restart mid-run loses liveness data.
+- **The control plane is single-instance.** Its NATS subscription uses no queue group, so a second
+  instance would not share the work — both would handle every worker-completion message and both
+  would run the watchdog, competing over the same run rows. The workers scale horizontally by
+  design; the thing that coordinates them does not, and making it do so needs a queue group and a
+  leader for the watchdog rather than a second container.
+- **Fleet membership is counted with Redis `KEYS`.** `WorkerRegistry` globs the keyspace to count
+  live workers and shards, and `KEYS` scans every key on Redis's single thread. At this project's
+  key counts it is microseconds; on a shared Redis with a large keyspace it is a stall that
+  arrives, unhelpfully, exactly while a run is in flight. `SCAN` is the fix, at the cost of a
+  count that can be slightly stale.
 - **No result retention policy beyond a 30-day TTL** on the ClickHouse tables.
 - **Percentile precision is bounded** by histogram bucket resolution (see decision 2).
 - **Reported throughput averages over the whole run, ramp-up included.** A 20s run with a 5s ramp
@@ -501,12 +511,32 @@ Deliberately out of scope for a portfolio reference implementation:
   knowing before writing a `throughput >` assertion.
 - **Assertions cover p50, p95 and p99 only.** A `p99.9` assertion is rejected at evaluation time
   rather than silently answered with p99.
+- **Assertions are run-wide; a step cannot be asserted on its own.** `p95 < 250ms` is a statement
+  about the whole scenario, which is the right default — it is what a user of the flow experiences.
+  But a scenario whose checkout step is slow and whose product listing is fast and heavily weighted
+  can pass on the merged distribution while the endpoint anybody cares about regressed. The per-step
+  numbers are in the report; only the verdict cannot see them.
+- **An assertion threshold without a unit is assumed, not rejected.** `p95 < 250` means
+  milliseconds, `throughput > 380` means requests per second, `errorRate < 1` means one percent.
+  The assumptions are the sensible ones and they are never wrong by accident — but they are
+  assumptions, and `p95 < 2` reads like two seconds to most people and means two milliseconds here.
+  Writing the unit is always accepted and always clearer.
 - **Per-worker latency is not queryable.** `latency_buckets` carries no `worker_id` column — the
   table exists to be merged across workers, and adding the dimension would invite exactly the
   averaging mistake decision 2 is about. The cost is real: "which worker saw the slow tail?" cannot
   be answered from the bucket table, only from the raw histogram blobs in `metric_snapshots`.
 - **Fleet size is frozen at dispatch.** Workers that start mid-run sit the run out rather than
   joining, since a rate that changes halfway through would splice two experiments together.
+- **A fleet larger than the arrival rate leaves workers idle.** The rate is split by integer
+  division with the remainder handed to the lowest shard indices, so 3 req/s across 5 workers gives
+  1/1/1/0/0. The fleet total is still exactly 3 — nothing is lost — but two workers claim a shard,
+  issue nothing, and report finished, and the run's `workers` count reflects only those that
+  actually measured something. Harmless at any realistic rate, and worth knowing before reading a
+  worker count as a fleet size.
+- **A shard that starts late is logged, not reported.** Workers align to one wall-clock instant so
+  the fleet's ramp is a single curve; a shard more than 250 ms late warns in its own log and
+  nowhere else. The run's results cannot say that its ramp was uneven, which is the one place
+  somebody comparing two runs would want to know.
 - **Shard rounding shifts the total by a request or two.** 200 req/s across 3 workers gives shards
   of 67/67/66 — exact — but each shard rounds its own ramp-up integral independently, so a run may
   issue 3 501 rather than 3 500. Visible, bounded, and not worth a distributed counter to remove.

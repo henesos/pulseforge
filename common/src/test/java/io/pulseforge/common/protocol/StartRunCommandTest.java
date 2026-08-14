@@ -50,18 +50,22 @@ class StartRunCommandTest {
     }
 
     @Test
-    @DisplayName("no shard is ever starved when there are more workers than requests per second")
-    void handlesMoreWorkersThanRate() {
+    @DisplayName("a fleet larger than the rate leaves shards idle, and still issues the rate exactly")
+    void moreWorkersThanRateLeavesIdleShards() {
         StartRunCommand command = command(3, 5);
 
         assertThat(command.rateForShard(0)).isEqualTo(1);
-        assertThat(command.rateForShard(4)).isZero();
+        assertThat(command.rateForShard(4))
+                .as("3 req/s cannot be split five ways; two shards claim a run and issue nothing")
+                .isZero();
 
         double total = 0;
         for (int shard = 0; shard < 5; shard++) {
             total += command.rateForShard(shard);
         }
-        assertThat(total).isEqualTo(3);
+        assertThat(total)
+                .as("what matters is that the idle shards cost the fleet nothing")
+                .isEqualTo(3);
     }
 
     private static StartRunCommand command(int arrivalRate, int workerCount) {
