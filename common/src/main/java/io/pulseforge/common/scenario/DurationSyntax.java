@@ -1,6 +1,7 @@
 package io.pulseforge.common.scenario;
 
 import java.time.Duration;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,7 +24,7 @@ public final class DurationSyntax {
         if (literal == null || literal.isBlank()) {
             throw new IllegalArgumentException("duration must not be blank");
         }
-        Matcher matcher = LITERAL.matcher(literal.trim().toLowerCase());
+        Matcher matcher = LITERAL.matcher(literal.trim().toLowerCase(Locale.ROOT));
         if (!matcher.matches()) {
             throw new IllegalArgumentException(
                     "unsupported duration '" + literal + "', expected forms: 500ms, 30s, 2m, 1h");

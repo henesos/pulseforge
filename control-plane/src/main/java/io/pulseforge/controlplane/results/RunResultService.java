@@ -28,7 +28,6 @@ public class RunResultService {
         long allDropped = 0;
         long allSkipped = 0;
         long maxMicros = 0;
-        int workers = 0;
         long firstMillis = Long.MAX_VALUE;
         long lastMillis = 0;
 
@@ -57,7 +56,6 @@ public class RunResultService {
             allDropped += total.droppedSamples();
             allSkipped += total.skippedRequests();
             maxMicros = Math.max(maxMicros, total.maxMicros());
-            workers = Math.max(workers, total.workers());
             firstMillis = Math.min(firstMillis, total.firstWindowMillis());
             lastMillis = Math.max(lastMillis, total.lastWindowMillis());
         }
@@ -66,6 +64,11 @@ public class RunResultService {
         // statement about the whole scenario, not about one endpoint within it.
         long[] overall = repository.percentilesForRun(run.getId(), P50, P95, P99);
         double runSeconds = totals.isEmpty() ? 0 : spanSeconds(firstMillis, lastMillis);
+
+        // Counted across the run, not as the largest per-step figure: two workers that each served
+        // a different step contribute one worker apiece to their own row, and taking the maximum
+        // would report one worker for a fleet of two.
+        int workers = repository.contributingWorkers(run.getId());
 
         return new RunResults(
                 run.getId(),

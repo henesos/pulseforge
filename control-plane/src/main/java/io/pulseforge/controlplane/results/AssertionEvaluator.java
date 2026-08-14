@@ -3,6 +3,8 @@ package io.pulseforge.controlplane.results;
 import io.pulseforge.common.domain.Assertion;
 import java.util.ArrayList;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -14,12 +16,36 @@ import org.springframework.stereotype.Component;
 @Component
 public class AssertionEvaluator {
 
+    private static final Logger log = LoggerFactory.getLogger(AssertionEvaluator.class);
+
     public Verdict evaluate(List<Assertion> assertions, RunResults results) {
+        // A run with no measurements reports zero for every percentile and zero for the error rate,
+        // which satisfies `p95 < 250ms` and `errorRate < 1%` for the wrong reason. Passing here
+        // would gate a deploy green on an experiment that never produced a single sample.
+        if (results.totalRequests() == 0) {
+            log.warn("Run {}: no measurements recorded; every assertion fails", results.runId());
+            return new Verdict(
+                    false,
+                    assertions.stream()
+                            .map(a -> new AssertionOutcome(a.describe(), Double.NaN, false))
+                            .toList());
+        }
+
         List<AssertionOutcome> outcomes = new ArrayList<>(assertions.size());
         boolean allPassed = true;
 
         for (Assertion assertion : assertions) {
-            double actual = actualValue(assertion, results);
+            double actual;
+            try {
+                actual = actualValue(assertion, results);
+            } catch (UnsupportedPercentileException e) {
+                // One unanswerable assertion must not hide what every other one measured. It counts
+                // as a failure and the rest of the report survives.
+                log.warn("Run {}: {}", results.runId(), e.getMessage());
+                outcomes.add(new AssertionOutcome(assertion.describe(), Double.NaN, false));
+                allPassed = false;
+                continue;
+            }
             boolean passed = assertion.evaluate(actual);
             allPassed &= passed;
             outcomes.add(new AssertionOutcome(assertion.describe(), actual, passed));

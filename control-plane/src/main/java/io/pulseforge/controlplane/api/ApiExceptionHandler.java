@@ -4,6 +4,7 @@ import io.pulseforge.common.scenario.ScenarioParser;
 import io.pulseforge.controlplane.results.AssertionEvaluator;
 import io.pulseforge.controlplane.service.RunService;
 import io.pulseforge.controlplane.service.ScenarioService;
+import io.pulseforge.controlplane.service.WorkerRegistry;
 import java.time.Instant;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -43,6 +44,16 @@ public class ApiExceptionHandler {
     @ExceptionHandler(RunService.NoWorkersAvailableException.class)
     public ProblemDetail onNoWorkers(RunService.NoWorkersAvailableException e) {
         return problem(HttpStatus.CONFLICT, "No workers available", e.getMessage());
+    }
+
+    /**
+     * Distinct from "no workers available" on purpose: an unreadable coordination store is an
+     * infrastructure fault, and reporting it as an empty fleet sends the operator to the wrong box.
+     */
+    @ExceptionHandler(WorkerRegistry.RegistryUnavailableException.class)
+    public ProblemDetail onRegistryUnavailable(WorkerRegistry.RegistryUnavailableException e) {
+        return problem(
+                HttpStatus.SERVICE_UNAVAILABLE, "Coordination store unavailable", e.getMessage());
     }
 
     private static ProblemDetail problem(HttpStatus status, String title, String detail) {

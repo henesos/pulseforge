@@ -3,8 +3,6 @@ package io.pulseforge.controlplane.service;
 import io.pulseforge.common.protocol.RedisKeys;
 import java.util.Set;
 import java.util.UUID;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -16,8 +14,6 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class WorkerRegistry {
-
-    private static final Logger log = LoggerFactory.getLogger(WorkerRegistry.class);
 
     private final StringRedisTemplate redis;
 
@@ -33,23 +29,30 @@ public class WorkerRegistry {
      * stitched together.
      */
     public int liveWorkerCount() {
-        try {
-            Set<String> keys = redis.keys(RedisKeys.workerPresencePattern());
-            return keys == null ? 0 : keys.size();
-        } catch (RuntimeException e) {
-            log.error("Could not read the worker fleet from Redis", e);
-            return 0;
-        }
+        return count(RedisKeys.workerPresencePattern(), "the worker fleet");
     }
 
     /** Workers currently generating load for a run, by their liveness keys. */
     public int liveShardCount(UUID runId) {
+        return count(RedisKeys.runWorkerAlivePattern(runId), "liveness for run " + runId);
+    }
+
+    private int count(String pattern, String what) {
         try {
-            Set<String> keys = redis.keys(RedisKeys.runWorkerAlivePattern(runId));
+            Set<String> keys = redis.keys(pattern);
             return keys == null ? 0 : keys.size();
         } catch (RuntimeException e) {
-            log.error("Could not read liveness for run {}", runId, e);
-            return 0;
+            // Deliberately not zero. "Redis is unreachable" and "no workers are running" are
+            // different facts, and substituting the first for the second sends the operator to
+            // inspect a healthy fleet — or, in the watchdog, degrades every active run.
+            throw new RegistryUnavailableException("could not read " + what + " from Redis", e);
+        }
+    }
+
+    /** Raised when the coordination store cannot answer, as distinct from answering zero. */
+    public static class RegistryUnavailableException extends RuntimeException {
+        public RegistryUnavailableException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 }

@@ -46,7 +46,7 @@ Verify the deployment can actually run a test — one call, every dependency:
 $ curl -s localhost:8080/api/v1/system/status | jq
 {
   "status": "UP",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "checkedAt": "2026-08-13T19:28:01.650743560Z",
   "components": {
     "clickhouse": "UP",
@@ -83,26 +83,28 @@ Actual output from the smoke-test scenario (200 req/s for 20s with a 5s ramp, th
 steps):
 
 ```
-step                requests   errors   err%      p50       p95       p99       max
-GET /api/fast          2 086        0   0.00%   2.24ms    3.70ms    4.43ms   59.07ms
-GET /api/flaky           370       31   8.38%  21.33ms   22.35ms   23.31ms   25.87ms
-POST /api/slow         1 044        0   0.00% 149.76ms  178.69ms  181.38ms  182.40ms
--------------------------------------------------------------------------------------
-run total              3 500       31   0.89%   3.30ms  170.62ms  180.22ms  182.40ms
+step                      requests   errors    err%       p50       p95       p99       max
+------------------------------------------------------------------------------------------
+GET /api/fast                 2101        0   0.00%    1.88ms    3.16ms    3.42ms   10.01ms
+GET /api/flaky                 359       29   8.08%   20.91ms   21.47ms   21.76ms   23.31ms
+POST /api/slow                1040        0   0.00%  148.86ms  178.30ms  180.99ms  181.50ms
+------------------------------------------------------------------------------------------
+run total                     3500       29   0.83%    2.91ms  170.88ms  179.46ms  181.50ms
 
-throughput 165.9 req/s   workers 1   dropped samples 0   skipped requests 0
+throughput 181.6 req/s   workers 2   dropped samples 0   skipped requests 0
 
-ASSERTIONS                      actual     result
-  p95 < 400ms                  170.62ms     PASS
-  errorRate < 5%                  0.89%     PASS
-                                          -------
-                                            PASS
+ASSERTIONS                         actual   result
+  p95 < 400ms                      170.88   PASS
+  errorRate < 5%                     0.83   PASS
+
+  PASS
 ```
 
 The request count is not approximate: a 5s linear ramp to 200 req/s delivers exactly 500 requests
 (the triangle under the ramp), plus 15s of steady state at 200 req/s — **3 500**, which is what
-the run issued. And 61 snapshot messages crossed the bus for those 3 500 requests, because workers
-ship one histogram per step per second rather than one message per request.
+the run issued. And each worker put ~61 snapshot messages on the bus for its share of those 3 500
+requests — three steps once a second for 20 seconds, plus a final flush — because workers ship one
+histogram per step per interval rather than one message per request.
 
 ### Scaling the fleet
 
@@ -134,16 +136,19 @@ docker kill --signal=KILL pulseforge-load-worker-4      # mid-run, no chance to 
 ```
 
 ```
-$ curl -s localhost:8080/api/v1/runs/fd1e9439-.../results | jq '.results | {status, statusReason, totalRequests}'
+$ curl -s localhost:8080/api/v1/runs/b5a3c434-.../results | jq '.results | {status, statusReason, totalRequests}'
 {
   "status": "DEGRADED",
-  "statusReason": "1 of 5 worker shards stopped reporting (4 alive, 0 finished); the run generated less than the requested 250 req/s",
-  "totalRequests": 12297
+  "statusReason": "1 of 3 worker shards stopped reporting (2 alive, 0 finished when detected); the run generated less than the requested 250 req/s",
+  "totalRequests": 10815
 }
 ```
 
-Detected 5 seconds after the kill. A full 60s run at 250 req/s would have issued ~14 375 requests;
-this one managed 12 297 — and **its assertions still pass**. That is precisely why `DEGRADED` is a
+The worker was killed 20 seconds in. The run kept going for its full 60 seconds on the two
+surviving shards and turned terminal 78 seconds after it started — the duration, plus the settle
+window. A complete run at 250 req/s would have issued ~14 375 requests; this one managed 10 815,
+which is the two survivors' full share plus what the third managed before it died — and **its
+assertions still pass**. That is precisely why `DEGRADED` is a
 status rather than a footnote: the percentiles look perfectly healthy and describe an experiment
 that never actually ran.
 
@@ -282,16 +287,18 @@ run DEGRADED
 
 step                      requests   errors    err%       p50       p95       p99       max
 ------------------------------------------------------------------------------------------
-GET /api/fast                 2253        0   0.00%    2.00ms    3.28ms    3.65ms   26.77ms
+GET /api/fast                10815        0   0.00%    1.95ms    3.26ms    3.56ms   30.18ms
+------------------------------------------------------------------------------------------
+run total                    10815        0   0.00%    1.95ms    3.26ms    3.56ms   30.18ms
 
-throughput 148.1 req/s   workers 3   dropped samples 0   skipped requests 0
+throughput 188.8 req/s   workers 3   dropped samples 0   skipped requests 0
 
 !! run status DEGRADED
-   1 of 3 worker shards stopped reporting (2 alive, 0 finished); the run generated less than
-   the requested 250 req/s
+   1 of 3 worker shards stopped reporting (2 alive, 0 finished when detected); the run
+   generated less than the requested 250 req/s
 
 ASSERTIONS                         actual   result
-  p95 < 500ms                        3.28   PASS
+  p95 < 500ms                        3.26   PASS
   errorRate < 5%                     0.00   PASS
 
   PASS
@@ -430,8 +437,12 @@ result.
 gets deleted on shutdown — a worker that is SIGKILLed, partitioned or wedged in a GC pause never
 gets to deregister itself, and those are exactly the failures worth catching. Expiry *is* the
 signal. The check is `claimed shards == still alive + already finished`; anything missing from both
-sides stopped without saying so, and the run terminates as `DEGRADED` with a reason naming the
-shortfall.
+sides stopped without saying so. Detection and termination are deliberately separate: the loss is
+recorded the moment it is seen, but the run keeps going and the survivors generate load for the
+full duration that was asked for. Only once that duration is spent — plus the settle delay — does
+the status turn `DEGRADED`, carrying a reason that names the shortfall. Ending the run at detection
+time would flip `/results` to a final `200 OK` while load was still being issued, so the same URL
+would keep answering with larger numbers afterwards.
 
 Two levels of liveness exist because they answer different questions: fleet presence
 (`pulseforge:workers:*`) says which workers are available to receive a run, per-run liveness
@@ -439,9 +450,10 @@ Two levels of liveness exist because they answer different questions: fleet pres
 healthy while its generator thread is dead.
 
 **Trade-off.** Requires liveness tracking and a watchdog the system would otherwise not need, and
-the TTL sets a floor on detection latency (~6s at a 2s heartbeat — three beats, so one missed
-heartbeat from a GC pause is not mistaken for a death). Worth it: the alternative is a report that
-looks correct and isn't.
+the TTL sets a floor on detection latency: a 2s heartbeat with a 3x TTL expires after 6s, and the
+watchdog polls every 5s, so a death is noticed 6-11s after it happens. Tolerating two missed
+heartbeats is what keeps a GC pause from being mistaken for a death. Worth it: the alternative is a
+report that looks correct and isn't.
 
 ### 6. Ramp-up is part of the load profile, not a client-side courtesy
 
@@ -451,9 +463,9 @@ connection pools and empty caches — not steady-state behaviour.
 **Options.** (a) Warm up manually before the run. (b) Discard the first N seconds of results.
 (c) Model ramp-up in the profile itself.
 
-**Choice.** (c). `rampUp` makes the target rate rise linearly from zero (`LoadProfile.rateAt`), and
-the ramp is applied consistently across every worker so the fleet-wide rate follows the intended
-curve.
+**Choice.** (c). `rampUp` makes the target rate rise linearly from zero. `ArrivalSchedule` inverts
+the integral of that rising rate to get each request's send time, and every worker applies the same
+shape to its own shard, so the fleet-wide rate follows the intended curve.
 
 **Trade-off.** The ramp window mixes warm-up with steady-state samples in the overall histogram.
 Per-window snapshots keep both separable in analysis.
@@ -512,23 +524,36 @@ feature.
 
 ## Development
 
-The Gradle build runs inside a container, so the host needs nothing but Docker:
+The Gradle build runs inside a container, so the host needs nothing but Docker. The cache volume
+has to be created with your own ownership first — Docker would otherwise create it root-owned, and
+Gradle running as `$(id -u)` cannot unpack its native libraries into it:
 
 ```bash
+# Once per machine.
+docker volume create pulseforge-gradle
+docker run --rm -v pulseforge-gradle:/gradle-home alpine \
+  chown -R $(id -u):$(id -g) /gradle-home
+
+# Every build after that.
 docker run --rm -u $(id -u):$(id -g) \
   -v "$PWD":/workspace -v pulseforge-gradle:/gradle-home \
   -w /workspace -e GRADLE_USER_HOME=/gradle-home \
   gradle:8.11-jdk21 gradle build
 ```
 
-A local JDK 21 works too, via `./gradlew build`.
+Skipping the `chown` fails with `Failed to load native library 'libnative-platform.so'`, which does
+not mention permissions anywhere.
+
+`./gradlew build` works too, but only with a **JDK 21** on the host. The toolchain is pinned to 21
+and no download repository is configured, so an older JDK fails with `No locally installed
+toolchains match` rather than fetching one.
 
 The unit tests cover the parts where a subtle error would silently corrupt results: the arrival
-schedule's ramp-up integral, scenario and assertion parsing, the histogram merge, and rate
-sharding.
+schedule's ramp-up integral, scenario and assertion parsing, the histogram merge, rate sharding,
+the assertion-to-measurement mapping behind the verdict, and completion accounting.
 
 ```bash
-./gradlew test               # 32 unit tests, no Docker required
+./gradlew test               # 41 unit tests, no Docker required
 ./gradlew integrationTest    # Testcontainers: real ClickHouse and PostgreSQL
 ```
 
