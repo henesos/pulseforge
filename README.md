@@ -399,9 +399,18 @@ overflow, count every drop.
 On overflow the sample is discarded and `dropped_samples` is incremented, stored per snapshot in
 ClickHouse and **surfaced in the run report**.
 
+The same rule applies at every later hop, because a bounded queue that drops silently is worse than
+the block it replaced. A gRPC stream the ingestor is too slow to read refuses the window rather than
+buffering it in the worker's heap. The ingestor's own inbound queue drops on overflow too, and
+records what it threw away against the run it belonged to — that is the only moment anything still
+knows how many measurements were inside. Those reach the report as `unstoredSamples`, kept separate
+from `droppedSamples` because the two are fixed in different places: one says a worker cannot ship
+as fast as it measures, the other says the ingestor cannot keep up with the fleet.
+
 **Trade-off.** Results can be incomplete. That is the point: a run that reports
 `dropped_samples: 12043` tells you its percentiles are suspect, whereas silent data loss produces
-a clean-looking report that is quietly wrong.
+a clean-looking report that is quietly wrong. Any of the three counters being non-zero makes
+`isComplete` false, which is what the CLI turns into a non-zero exit code.
 
 ### 4. Open-loop arrival rate, because coordinated omission destroys tail latency
 

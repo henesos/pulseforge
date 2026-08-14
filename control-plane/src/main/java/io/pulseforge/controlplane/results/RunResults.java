@@ -12,6 +12,10 @@ import java.util.UUID;
  *                        are computed from an incomplete population — reported rather than hidden.
  * @param skippedRequests requests the generators could not issue. Non-zero means the offered rate
  *                        was not achieved and throughput understates what was asked for.
+ * @param unstoredSamples measurements that were shipped, reached the ingestor, and were never
+ *                        stored. Kept apart from {@code droppedSamples} because the two call for
+ *                        different fixes: one says the worker cannot ship as fast as it measures,
+ *                        the other says the ingestor or ClickHouse cannot keep up with the fleet.
  * @param workers         how many distinct workers contributed measurements
  */
 public record RunResults(
@@ -30,15 +34,20 @@ public record RunResults(
         double maxMs,
         long droppedSamples,
         long skippedRequests,
+        long unstoredSamples,
         int workers,
         List<StepResult> steps) {
 
     /**
-     * True when the measurement is sound — nothing was dropped and nothing was skipped — regardless
-     * of whether the assertions passed. False means the percentiles above describe an incomplete
-     * population, which is a reason to re-run rather than to trust the verdict.
+     * True when the measurement is sound — nothing was dropped, skipped or lost on the way to
+     * storage — regardless of whether the assertions passed. False means the percentiles above
+     * describe an incomplete population, which is a reason to re-run rather than to trust the
+     * verdict.
      */
     public boolean isComplete() {
-        return totalRequests > 0 && droppedSamples == 0 && skippedRequests == 0;
+        return totalRequests > 0
+                && droppedSamples == 0
+                && skippedRequests == 0
+                && unstoredSamples == 0;
     }
 }

@@ -53,6 +53,10 @@ public class ResultsPrinter {
                 results.get("workers").asInt(),
                 results.get("droppedSamples").asLong(),
                 results.get("skippedRequests").asLong());
+        long unstoredSamples = results.path("unstoredSamples").asLong();
+        if (unstoredSamples > 0) {
+            out.printf("unstored samples %d%n", unstoredSamples);
+        }
 
         printMeasurementWarnings(results);
         printAssertions(payload);
@@ -74,6 +78,16 @@ public class ResultsPrinter {
         }
         if (results.get("droppedSamples").asLong() > 0) {
             out.println("!! samples were dropped; percentiles are computed from an incomplete population");
+        }
+        long unstored = results.path("unstoredSamples").asLong();
+        if (unstored > 0) {
+            // Named apart from a dropped sample on purpose: the two are fixed in different places,
+            // and telling an operator to raise a worker's queue when the ingestor is the bottleneck
+            // sends them to rebuild the wrong thing.
+            out.printf(
+                    "!! %d measurements reached the ingestor and were never stored; "
+                            + "the ingestor or ClickHouse could not keep up%n",
+                    unstored);
         }
         if (results.get("skippedRequests").asLong() > 0) {
             out.println("!! requests were skipped; the offered rate was not achieved");

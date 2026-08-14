@@ -39,6 +39,7 @@ public class SnapshotBuffer {
     private static final Logger log = LoggerFactory.getLogger(SnapshotBuffer.class);
 
     private final SnapshotWriter writer;
+    private final IngestLossLedger losses;
     private final IngestorProperties properties;
     private final BlockingQueue<HistogramSnapshot> queue;
 
@@ -51,8 +52,10 @@ public class SnapshotBuffer {
 
     private Thread writerThread;
 
-    public SnapshotBuffer(SnapshotWriter writer, IngestorProperties properties) {
+    public SnapshotBuffer(
+            SnapshotWriter writer, IngestLossLedger losses, IngestorProperties properties) {
         this.writer = writer;
+        this.losses = losses;
         this.properties = properties;
         this.queue = new ArrayBlockingQueue<>(properties.queueCapacity());
     }
@@ -75,6 +78,9 @@ public class SnapshotBuffer {
             return true;
         }
         dropped.increment();
+        // Attributed to the run before the snapshot is let go: this object is the only place that
+        // still knows how many measurements are about to disappear and which run they belonged to.
+        losses.record(snapshot, IngestLossLedger.Reason.QUEUE_FULL);
         return false;
     }
 
@@ -101,12 +107,18 @@ public class SnapshotBuffer {
                 flush(batch);
                 batch.clear();
                 nextFlush = System.nanoTime() + flushIntervalNanos;
+            } else if (intervalElapsed) {
+                // Recorded loss can outlive the traffic that caused it: a run whose final snapshots
+                // were the ones dropped leaves nothing behind for them to ride along with.
+                losses.writePending();
+                nextFlush = System.nanoTime() + flushIntervalNanos;
             }
         }
 
         if (!batch.isEmpty()) {
             flush(batch);
         }
+        losses.writePending();
         log.info(
                 "Writer stopped: {} received, {} written, {} dropped, {} failed, {} partial",
                 received.sum(),
@@ -133,9 +145,14 @@ public class SnapshotBuffer {
         } catch (Exception e) {
             // A failed batch is lost rather than retried forever: retrying indefinitely would fill
             // the queue and cause drops that look like measurement loss instead of a storage fault.
+            // Lost, but not silently — the runs it belonged to say so.
             failed.add(batch.size());
+            losses.recordAll(batch, IngestLossLedger.Reason.WRITE_FAILED);
             log.error("Failed to write batch of {} snapshots", batch.size(), e);
         }
+        // After the batch either way, so a loss recorded while ClickHouse was refusing writes is
+        // retried as soon as it accepts one again.
+        losses.writePending();
     }
 
     @PreDestroy
