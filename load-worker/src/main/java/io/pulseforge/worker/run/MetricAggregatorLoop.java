@@ -45,6 +45,9 @@ public class MetricAggregatorLoop implements Runnable {
     private final CountDownLatch finished = new CountDownLatch(1);
     private long lastDroppedTotal;
     private long lastSkippedTotal;
+    /** Counters from windows that never left the worker, owed to the next snapshot. */
+    private long carriedDropped;
+    private long carriedSkipped;
 
     public MetricAggregatorLoop(
             UUID runId,
@@ -159,15 +162,24 @@ public class MetricAggregatorLoop implements Runnable {
     /**
      * Emits one snapshot per step. Counters that the worker tracks as running totals (dropped,
      * skipped) are published as deltas so that summing snapshots gives the true run total.
+     *
+     * <p>A delta is only true once. If the snapshot carrying it never leaves the worker, the count
+     * it described is subtracted from the run's report permanently — the running total has already
+     * moved past it, so no later window will mention it again. Anything a failed send was carrying
+     * is therefore kept and added to the next window, and the measurements that died with the
+     * window are counted as the dropped samples they now are.
      */
     private void publish(Instant windowStart, Instant windowEnd) {
         long droppedTotal = pipeline.droppedSamples();
-        long droppedDelta = droppedTotal - lastDroppedTotal;
+        long droppedDelta = droppedTotal - lastDroppedTotal + carriedDropped;
         lastDroppedTotal = droppedTotal;
 
         long skippedTotal = execution.skippedRequests();
-        long skippedDelta = skippedTotal - lastSkippedTotal;
+        long skippedDelta = skippedTotal - lastSkippedTotal + carriedSkipped;
         lastSkippedTotal = skippedTotal;
+
+        long undeliveredDropped = 0;
+        long undeliveredSkipped = 0;
 
         for (int i = 0; i < aggregators.length; i++) {
             StepAggregator aggregator = aggregators[i];
@@ -197,8 +209,16 @@ public class MetricAggregatorLoop implements Runnable {
             if (snapshot.isEmpty()) {
                 continue;
             }
-            transport.send(snapshot);
+            if (!transport.send(snapshot)) {
+                // The window's measurements are gone — the aggregator was already reset — so they
+                // become dropped samples, which is exactly what they are: taken and never reported.
+                undeliveredDropped += snapshot.requestCount() + snapshot.droppedSamples();
+                undeliveredSkipped += snapshot.skippedRequests();
+            }
         }
+
+        carriedDropped = undeliveredDropped;
+        carriedSkipped = undeliveredSkipped;
     }
 
     public void stop() {
