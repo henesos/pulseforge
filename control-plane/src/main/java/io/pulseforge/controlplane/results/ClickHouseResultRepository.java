@@ -130,6 +130,32 @@ public class ClickHouseResultRepository {
     }
 
     /**
+     * What the ingestor received for this run and never stored.
+     *
+     * <p>Read as its own query rather than joined into the totals: the loss table is keyed by run
+     * and reason, and a run with no loss has no rows at all, which a join would turn into no
+     * results.
+     */
+    public IngestLosses ingestLosses(UUID runId) {
+        String sql =
+                """
+                SELECT sum(lost_requests), sum(lost_dropped), sum(lost_skipped)
+                FROM %s
+                WHERE run_id = '%s'
+                FORMAT TabSeparated
+                """
+                        .formatted(table("ingest_losses"), runId);
+
+        List<String[]> rows = query(sql, 3);
+        if (rows.isEmpty()) {
+            return IngestLosses.NONE;
+        }
+        String[] row = rows.get(0);
+        return new IngestLosses(
+                Long.parseLong(row[0]), Long.parseLong(row[1]), Long.parseLong(row[2]));
+    }
+
+    /**
      * Global percentiles for one step, merged across every worker.
      *
      * @param quantiles fractions in (0, 1), e.g. 0.5, 0.95, 0.99
@@ -281,6 +307,19 @@ public class ClickHouseResultRepository {
      */
     private static String escape(String value) {
         return value.replace("\\", "\\\\").replace("'", "\\'");
+    }
+
+    /**
+     * Measurements that reached the ingestor and were never stored, plus the counters the lost
+     * snapshots were carrying.
+     *
+     * @param lostRequests measurements missing from the percentiles above
+     * @param lostDropped  worker-side drops the lost snapshots were reporting, which would
+     *                     otherwise make the run understate its own incompleteness
+     * @param lostSkipped  likewise for requests the generator never issued
+     */
+    public record IngestLosses(long lostRequests, long lostDropped, long lostSkipped) {
+        public static final IngestLosses NONE = new IngestLosses(0, 0, 0);
     }
 
     /** Raw counters for one step, before percentiles are attached. */

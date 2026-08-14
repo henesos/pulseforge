@@ -107,6 +107,7 @@ class AssertionEvaluatorTest {
                 p99,
                 0,
                 0,
+                0,
                 1,
                 List.of());
     }

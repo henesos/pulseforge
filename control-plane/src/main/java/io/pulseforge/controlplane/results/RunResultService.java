@@ -70,6 +70,13 @@ public class RunResultService {
         // would report one worker for a fleet of two.
         int workers = repository.contributingWorkers(run.getId());
 
+        // Loss on the storage side of the wire. The counters the lost snapshots carried are folded
+        // into the run's own totals, because they are facts about the run that would otherwise
+        // vanish with the message that was reporting them.
+        ClickHouseResultRepository.IngestLosses lost = repository.ingestLosses(run.getId());
+        allDropped += lost.lostDropped();
+        allSkipped += lost.lostSkipped();
+
         return new RunResults(
                 run.getId(),
                 run.getStatus(),
@@ -86,6 +93,7 @@ public class RunResultService {
                 micronsToMillis(maxMicros),
                 allDropped,
                 allSkipped,
+                lost.lostRequests(),
                 workers,
                 steps);
     }

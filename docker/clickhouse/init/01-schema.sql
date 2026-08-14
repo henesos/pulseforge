@@ -11,6 +11,12 @@
 -- summing counts across every worker and walking the cumulative distribution, NOT by averaging the
 -- per-worker percentiles: the mean of five p99 values is not the p99 of the combined population.
 
+-- A third table, pulseforge.ingest_losses, is deliberately NOT defined here. This script runs only
+-- when a ClickHouse volume is first created, so anything added to it later never appears in a
+-- deployment that already has data — and a table recording lost measurements is the last thing that
+-- should silently not exist. The metrics-ingestor creates and owns it at startup; see
+-- io.pulseforge.ingestor.IngestLossLedger.
+
 CREATE DATABASE IF NOT EXISTS pulseforge;
 
 CREATE TABLE IF NOT EXISTS pulseforge.metric_snapshots
