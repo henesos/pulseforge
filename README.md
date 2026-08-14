@@ -561,11 +561,26 @@ Integration tests are a separate task on purpose — `gradle build` must stay ru
 a fast unit-test loop is worth more than the convenience of one command.
 
 > **Note:** `integrationTest` needs a Docker daemon whose published ports are reachable from the
-> JVM running the tests. It works from a host JDK. It does **not** work when Gradle itself runs
-> inside a container on Docker Desktop for WSL: Testcontainers publishes ports to the Docker VM's
-> host, which a sibling container cannot reach at either `172.17.0.1` or `host.docker.internal`.
-> The tests in this repository were compiled and wired up but have not been executed in that
-> containerised setup.
+> JVM running the tests. It works from a host JDK and on a CI runner. It does **not** work when
+> Gradle itself runs inside a container on Docker Desktop for WSL: Testcontainers publishes ports
+> to the Docker VM's host, which a sibling container cannot reach at either `172.17.0.1` or
+> `host.docker.internal`. That is what CI is for — the workflow runs `integrationTest` on every
+> push, so the environment that cannot run them locally is not the environment that gates them.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs three levels of confidence on every push:
+
+| Job | What it proves |
+|-----|----------------|
+| `unit` | `./gradlew build` — the arithmetic that would silently corrupt a result |
+| `integration` | `./gradlew integrationTest` — Flyway's schema matches the JPA mapping, and ClickHouse returns the percentiles the merge expects |
+| `e2e` | The compose stack comes up, then the CLI runs a scenario against it and the job gates on the exit code |
+
+The `e2e` job is the one worth reading. It runs the product against itself: a clean scenario must
+exit `0`, and a second run whose worker is `SIGKILL`ed twenty seconds in must exit `2` — not `0`,
+and not a shortened result. That is the contract this tool exists to offer a pipeline, and it is
+now verified by a pipeline.
 
 ### Tech stack
 
