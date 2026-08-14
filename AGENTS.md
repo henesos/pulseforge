@@ -24,8 +24,10 @@ every number quoted alongside it — lives in `README.md`.
   Desktop from the Windows side and it works; the whole suite runs locally. Set
   `TESTCONTAINERS_RYUK_DISABLED=true` as CI does — the resource reaper's socket handshake is a known
   way for container startup to hang here with no output.
-- CI has two jobs, `unit` and `integration`. There is no end-to-end job that runs the product
-  against itself, so a behavioural claim has to be checked by hand against the compose stack.
+- Before hand-rolling a behavioural check, read the `e2e` job in `.github/workflows/ci.yml` — it
+  already brings the stack up, runs the CLI against it and gates on the exit code. Note the job
+  name is `e2e`: a `grep '^  [a-z-]*:'` over the workflow will not list it, and concluding it does
+  not exist from that is a mistake this repository has already had made in it once.
 
 ## Conventions that differ from defaults
 

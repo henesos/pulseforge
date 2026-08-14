@@ -1,11 +1,8 @@
 name: CI
 
-# Two levels of confidence, cheapest first. `unit` is the fast loop; `integration` is the first
-# thing that touches a real database.
-#
-# A third level is missing and worth naming: nothing here runs the product against itself and gates
-# on the CLI's exit code, which is the only contract a pipeline actually consumes. Until that job
-# exists, an end-to-end claim has to be checked by hand against the compose stack.
+# Three levels of confidence, cheapest first. `unit` is the fast loop; `integration` is the first
+# thing that touches a real database; `e2e` runs the product against itself and gates on the exit
+# code, which is the only contract a pipeline actually consumes.
 on:
   push:
     branches: [main, 'fix/**', 'feat/**']
