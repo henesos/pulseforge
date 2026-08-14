@@ -9,7 +9,9 @@ import static org.mockito.Mockito.when;
 
 import io.pulseforge.common.domain.RunStatus;
 import io.pulseforge.controlplane.persistence.TestRunEntity;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,7 +36,7 @@ class RunResultServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new RunResultService(repository);
+        service = new RunResultService(repository, Clock.fixed(STARTED.plusSeconds(4), ZoneOffset.UTC));
         when(repository.stepTotals(any()))
                 .thenReturn(
                         List.of(
@@ -46,9 +48,7 @@ class RunResultServiceTest {
                                         0,
                                         2_000_000,
                                         9_000,
-                                        2,
-                                        STARTED.toEpochMilli(),
-                                        STARTED.plusSeconds(10).toEpochMilli())));
+                                        2)));
         when(repository.percentiles(any(), anyString(), anyDouble(), anyDouble(), anyDouble()))
                 .thenReturn(new long[] {1_000, 2_000, 3_000});
         when(repository.percentilesForRun(any(), anyDouble(), anyDouble(), anyDouble()))
@@ -56,6 +56,54 @@ class RunResultServiceTest {
         when(repository.contributingWorkers(any())).thenReturn(2);
         when(repository.ingestLosses(any()))
                 .thenReturn(ClickHouseResultRepository.IngestLosses.NONE);
+    }
+
+    @Test
+    @DisplayName("throughput is requests over the duration the test was asked to run")
+    void throughputUsesTheScheduledDuration() {
+        // 1 000 requests over the 10 seconds the scenario asked for. Not over the span of the
+        // windows that happened to hold measurements, which is shorter than the run whenever a
+        // shard starts late or goes quiet early — and reports a rate the run never sustained.
+        RunResults results = service.resultsFor(run());
+
+        assertThat(results.throughputPerSecond()).isEqualTo(100.0);
+    }
+
+    @Test
+    @DisplayName("the per-step rates sum back to the rate printed under them")
+    void stepThroughputSumsToTheRunThroughput() {
+        when(repository.stepTotals(any()))
+                .thenReturn(
+                        List.of(
+                                stepTotals("list-products", 600),
+                                stepTotals("checkout", 400)));
+
+        RunResults results = service.resultsFor(run());
+
+        assertThat(results.steps())
+                .extracting(StepResult::throughputPerSecond)
+                .containsExactly(60.0, 40.0);
+        assertThat(
+                        results.steps().stream()
+                                .mapToDouble(StepResult::throughputPerSecond)
+                                .sum())
+                .as("a table whose column does not add up to its own total is not a report")
+                .isEqualTo(results.throughputPerSecond());
+    }
+
+    @Test
+    @DisplayName("a run still in flight is credited only with the time it has had")
+    void anInFlightRunIsNotDividedByTheWholeDuration() {
+        TestRunEntity running =
+                new TestRunEntity(UUID.randomUUID(), UUID.randomUUID(), 100, 10, 0, 2, STARTED);
+        running.markRunning(STARTED);
+
+        RunResults results = service.resultsFor(running);
+
+        assertThat(results.throughputPerSecond())
+                .as("4 seconds in, 1 000 requests is 250/s — dividing by 10 would report 100/s "
+                        + "for a run that is beating it")
+                .isEqualTo(250.0);
     }
 
     @Test
@@ -113,6 +161,11 @@ class RunResultServiceTest {
                 .as("the lost requests have no latencies; counting them would invent throughput")
                 .isEqualTo(1_000);
         assertThat(results.p99Ms()).isEqualTo(3.0);
+    }
+
+    private static ClickHouseResultRepository.StepTotals stepTotals(String step, long requests) {
+        return new ClickHouseResultRepository.StepTotals(
+                step, requests, 0, 0, 0, requests * 2_000, 9_000, 2);
     }
 
     private static TestRunEntity run() {
