@@ -68,9 +68,7 @@ jobs:
       # Testcontainers needs a daemon whose published ports the JVM can reach. A GitHub runner
       # gives exactly that; a containerised Gradle on Docker Desktop for WSL does not, which is
       # why these tests could not be run locally.
-      # `--info` until these two files have a green run on record: the task logs only completed
-      # tests, so a hang during container startup otherwise produces no output at all to read.
-      - run: ./gradlew integrationTest --no-daemon --info
+      - run: ./gradlew integrationTest --no-daemon
 
       - name: Publish test report
         if: always()
