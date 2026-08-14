@@ -504,6 +504,14 @@ Deliberately out of scope for a portfolio reference implementation:
 - **gRPC ingestion is single-endpoint.** Workers dial one ingestor address with no client-side load
   balancing, so scaling ingestors horizontally needs a proxy in front. The NATS path scales by
   simply adding a subscriber.
+- **The two ingest tables are written without a transaction.** ClickHouse offers none spanning
+  them, so a failure between the inserts can leave a batch half-stored. The order is chosen so the
+  survivable half is the distribution: buckets are written first, and a run that hits this
+  under-reports requests while its percentiles stay correct. The mismatch is visible as
+  `sum(count)` in `latency_buckets` exceeding `sum(request_count)` in `metric_snapshots`; the
+  reverse ordering would give a percentile computed over part of the population with every counter
+  looking complete. A snapshot whose histogram will not decode is the one case where the imbalance
+  points the other way, and it costs only that snapshot's latency.
 
 ---
 
