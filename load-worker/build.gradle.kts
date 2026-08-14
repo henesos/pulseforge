@@ -11,4 +11,8 @@ dependencies {
 
     implementation(libs.jnats)
     implementation(libs.hdrhistogram)
+
+    // The shard claim's guarantee is Redis's atomicity, not the worker's code, so it is verified
+    // against a real server rather than a stub.
+    testImplementation("org.testcontainers:junit-jupiter")
 }
