@@ -69,7 +69,14 @@ public class ClickHouseResultRepository {
         return properties.database() + "." + name;
     }
 
-    /** Per-step counters and the run's wall-clock span. */
+    /**
+     * Per-step counters.
+     *
+     * <p>Deliberately no window bounds. They were read here to divide requests by the span the
+     * measurements happened to cover, which reports the rate over the period the system was busy
+     * rather than the period it was asked to be busy. Throughput is now divided by the run's own
+     * duration, and reading a span nothing uses would invite it back.
+     */
     public List<StepTotals> stepTotals(UUID runId) {
         String sql =
                 """
@@ -80,9 +87,7 @@ public class ClickHouseResultRepository {
                        sum(skipped_requests),
                        sum(sum_micros),
                        max(max_micros),
-                       uniqExact(worker_id),
-                       toUnixTimestamp64Milli(min(window_start)),
-                       toUnixTimestamp64Milli(max(window_end))
+                       uniqExact(worker_id)
                 FROM %s
                 WHERE run_id = '%s'
                 GROUP BY step_name
@@ -92,7 +97,7 @@ public class ClickHouseResultRepository {
                         .formatted(table("metric_snapshots"), runId);
 
         List<StepTotals> totals = new ArrayList<>();
-        for (String[] row : query(sql, 10)) {
+        for (String[] row : query(sql, 8)) {
             totals.add(
                     new StepTotals(
                             row[0],
@@ -102,9 +107,7 @@ public class ClickHouseResultRepository {
                             Long.parseLong(row[4]),
                             Long.parseLong(row[5]),
                             Long.parseLong(row[6]),
-                            Integer.parseInt(row[7]),
-                            Long.parseLong(row[8]),
-                            Long.parseLong(row[9])));
+                            Integer.parseInt(row[7])));
         }
         return totals;
     }
@@ -331,7 +334,5 @@ public class ClickHouseResultRepository {
             long skippedRequests,
             long sumMicros,
             long maxMicros,
-            int workers,
-            long firstWindowMillis,
-            long lastWindowMillis) {}
+            int workers) {}
 }

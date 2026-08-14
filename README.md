@@ -86,16 +86,16 @@ steps):
 ```
 step                      requests   errors    err%       p50       p95       p99       max
 ------------------------------------------------------------------------------------------
-GET /api/fast                 2101        0   0.00%    1.88ms    3.16ms    3.42ms   10.01ms
-GET /api/flaky                 359       29   8.08%   20.91ms   21.47ms   21.76ms   23.31ms
-POST /api/slow                1040        0   0.00%  148.86ms  178.30ms  180.99ms  181.50ms
+GET /api/fast                 2120        0   0.00%    2.43ms    4.06ms    5.21ms   56.80ms
+GET /api/flaky                 338       29   8.58%   21.63ms   22.90ms   23.74ms   24.22ms
+POST /api/slow                1042        0   0.00%  152.32ms  178.94ms  181.76ms  228.99ms
 ------------------------------------------------------------------------------------------
-run total                     3500       29   0.83%    2.91ms  170.88ms  179.46ms  181.50ms
+run total                     3500       29   0.83%    3.48ms  172.29ms  180.35ms  228.99ms
 
-throughput 181.6 req/s   workers 2   dropped samples 0   skipped requests 0
+throughput 175.0 req/s   workers 2   dropped samples 0   skipped requests 0
 
 ASSERTIONS                         actual   result
-  p95 < 400ms                      170.88   PASS
+  p95 < 400ms                      172.29   PASS
   errorRate < 5%                     0.83   PASS
 
   PASS
@@ -103,7 +103,9 @@ ASSERTIONS                         actual   result
 
 The request count is not approximate: a 5s linear ramp to 200 req/s delivers exactly 500 requests
 (the triangle under the ramp), plus 15s of steady state at 200 req/s — **3 500**, which is what
-the run issued. And each worker put ~61 snapshot messages on the bus for its share of those 3 500
+the run issued. The rate follows from it and is checkable by hand: 3 500 requests over the 20
+seconds the run was asked for is **175 req/s**, below the 200 the scenario names because the ramp
+genuinely delivered less. And each worker put ~61 snapshot messages on the bus for its share of those 3 500
 requests — three steps once a second for 20 seconds, plus a final flush — because workers ship one
 histogram per step per interval rather than one message per request.
 
@@ -141,13 +143,13 @@ $ curl -s localhost:8080/api/v1/runs/b5a3c434-.../results | jq '.results | {stat
 {
   "status": "DEGRADED",
   "statusReason": "1 of 3 worker shards stopped reporting (2 alive, 0 finished when detected); the run generated less than the requested 250 req/s",
-  "totalRequests": 10815
+  "totalRequests": 11473
 }
 ```
 
-The worker was killed 20 seconds in. The run kept going for its full 60 seconds on the two
-surviving shards and turned terminal 78 seconds after it started — the duration, plus the settle
-window. A complete run at 250 req/s would have issued ~14 375 requests; this one managed 10 815,
+The worker was killed 22 seconds in. The run kept going for its full 60 seconds on the two
+surviving shards and turned terminal 77 seconds after it started — the duration, plus the settle
+window. A complete run at 250 req/s would have issued ~15 000 requests; this one managed 11 473,
 which is the two survivors' full share plus what the third managed before it died — and **its
 assertions still pass**. That is precisely why `DEGRADED` is a
 status rather than a footnote: the percentiles look perfectly healthy and describe an experiment
@@ -288,18 +290,18 @@ run DEGRADED
 
 step                      requests   errors    err%       p50       p95       p99       max
 ------------------------------------------------------------------------------------------
-GET /api/fast                10815        0   0.00%    1.95ms    3.26ms    3.56ms   30.18ms
+GET /api/fast                11473        0   0.00%    2.05ms    3.39ms    3.97ms   44.96ms
 ------------------------------------------------------------------------------------------
-run total                    10815        0   0.00%    1.95ms    3.26ms    3.56ms   30.18ms
+run total                    11473        0   0.00%    2.05ms    3.39ms    3.97ms   44.96ms
 
-throughput 188.8 req/s   workers 3   dropped samples 0   skipped requests 0
+throughput 191.2 req/s   workers 3   dropped samples 0   skipped requests 0
 
 !! run status DEGRADED
    1 of 3 worker shards stopped reporting (2 alive, 0 finished when detected); the run
    generated less than the requested 250 req/s
 
 ASSERTIONS                         actual   result
-  p95 < 500ms                        3.26   PASS
+  p95 < 500ms                        3.39   PASS
   errorRate < 5%                     0.00   PASS
 
   PASS
@@ -484,85 +486,85 @@ Per-window snapshots keep both separable in analysis.
 
 ## Known Limitations
 
-Deliberately out of scope for a portfolio reference implementation:
+Two different kinds of thing live here, and mixing them makes both harder to weigh. The first list
+is what this deliberately is not. The second is where the code makes a choice that costs something —
+those are the ones worth arguing with.
 
-- **No authentication or authorization.** The REST API is fully open. Any real deployment needs at
-  minimum an API key in front of the run-trigger endpoints — this thing generates traffic.
+### Out of scope for a reference implementation
+
+- **No authentication or authorization.** The REST API is fully open, and this thing generates
+  traffic. Any real deployment needs at minimum an API key in front of the run-trigger endpoints.
 - **No TLS anywhere.** Plain HTTP between services and to the target; NATS is unauthenticated.
-- **HTTP/1.1 only.** No gRPC, WebSocket or raw-TCP load. The step model assumes request/response.
-- **Single region, single compose network.** No cross-region worker placement, so this measures
-  application latency, not network geography.
-- **No stateful scenarios.** No cookie jars, no correlation of a response value into the next
-  request, no login flows. Steps are independent and weighted.
-- **In-memory run state.** Redis persistence is off; a Redis restart mid-run loses liveness data.
+- **HTTP/1.1 only, for the load it generates.** No gRPC, WebSocket or raw-TCP *load* — the step
+  model assumes request/response. The gRPC elsewhere in this project carries metrics from workers
+  to the ingestor and is not something a scenario can put load on.
+- **Single region, single compose network.** This measures application latency, not network
+  geography.
+- **No stateful scenarios.** No cookie jars, no correlating a response value into the next request,
+  no login flows. Steps are independent and weighted.
+- **No result retention policy** beyond the 30-day TTL on the ClickHouse tables.
+
+### Trade-offs in what is built
+
+**Measurement**
+
+- **Percentile precision is bounded** by histogram bucket resolution — three significant digits, a
+  known and quantified error (decision 2).
+- **Throughput divides by the duration the run was asked for, ramp-up included.** A 20s run with a
+  5s ramp to 200 req/s reports 175 req/s: the ramp genuinely delivered 500 requests rather than
+  1 000. Correct, and worth knowing before writing a `throughput >` assertion.
+- **Per-worker latency is not queryable.** `latency_buckets` carries no `worker_id` — the table
+  exists to be merged across workers, and adding the dimension would invite exactly the averaging
+  mistake decision 2 is about. "Which worker saw the slow tail?" can only be answered from the raw
+  histograms in `metric_snapshots`.
+- **A shard that starts late is logged, not reported.** More than 250 ms late warns in the worker's
+  own log, so the results cannot say the run's ramp was uneven.
+
+**Verdicts**
+
+- **Assertions cover p50, p95 and p99 only.** A `p99.9` assertion is rejected at submission rather
+  than silently answered with p99.
+- **Assertions are run-wide; a step cannot be asserted on its own.** A slow checkout can pass behind
+  a fast, heavily weighted product listing. The per-step numbers are in the report — only the
+  verdict cannot see them.
+- **A threshold without a unit is assumed, not rejected.** `p95 < 250` is milliseconds,
+  `throughput > 380` is requests per second, `errorRate < 1` is one percent. Sensible assumptions,
+  but `p95 < 2` reads like two seconds and means two milliseconds.
+
+**Coordination**
+
 - **The control plane is single-instance.** Its NATS subscription uses no queue group, so a second
-  instance would not share the work — both would handle every worker-completion message and both
-  would run the watchdog, competing over the same run rows. The workers scale horizontally by
-  design; the thing that coordinates them does not, and making it do so needs a queue group and a
-  leader for the watchdog rather than a second container.
-- **Fleet membership is counted with Redis `KEYS`.** `WorkerRegistry` globs the keyspace to count
-  live workers and shards, and `KEYS` scans every key on Redis's single thread. At this project's
-  key counts it is microseconds; on a shared Redis with a large keyspace it is a stall that
-  arrives, unhelpfully, exactly while a run is in flight. `SCAN` is the fix, at the cost of a
-  count that can be slightly stale.
-- **No result retention policy beyond a 30-day TTL** on the ClickHouse tables.
-- **Percentile precision is bounded** by histogram bucket resolution (see decision 2).
-- **Reported throughput averages over the whole run, ramp-up included.** A 20s run with a 5s ramp
-  to 200 req/s reports ~166 req/s, not 200 — the ramp genuinely delivered less. Correct, but worth
-  knowing before writing a `throughput >` assertion.
-- **Assertions cover p50, p95 and p99 only.** A `p99.9` assertion is rejected at evaluation time
-  rather than silently answered with p99.
-- **Assertions are run-wide; a step cannot be asserted on its own.** `p95 < 250ms` is a statement
-  about the whole scenario, which is the right default — it is what a user of the flow experiences.
-  But a scenario whose checkout step is slow and whose product listing is fast and heavily weighted
-  can pass on the merged distribution while the endpoint anybody cares about regressed. The per-step
-  numbers are in the report; only the verdict cannot see them.
-- **An assertion threshold without a unit is assumed, not rejected.** `p95 < 250` means
-  milliseconds, `throughput > 380` means requests per second, `errorRate < 1` means one percent.
-  The assumptions are the sensible ones and they are never wrong by accident — but they are
-  assumptions, and `p95 < 2` reads like two seconds to most people and means two milliseconds here.
-  Writing the unit is always accepted and always clearer.
-- **Per-worker latency is not queryable.** `latency_buckets` carries no `worker_id` column — the
-  table exists to be merged across workers, and adding the dimension would invite exactly the
-  averaging mistake decision 2 is about. The cost is real: "which worker saw the slow tail?" cannot
-  be answered from the bucket table, only from the raw histogram blobs in `metric_snapshots`.
-- **Fleet size is frozen at dispatch.** Workers that start mid-run sit the run out rather than
-  joining, since a rate that changes halfway through would splice two experiments together.
-- **A fleet larger than the arrival rate leaves workers idle.** The rate is split by integer
-  division with the remainder handed to the lowest shard indices, so 3 req/s across 5 workers gives
-  1/1/1/0/0. The fleet total is still exactly 3 — nothing is lost — but two workers claim a shard,
-  issue nothing, and report finished, and the run's `workers` count reflects only those that
-  actually measured something. Harmless at any realistic rate, and worth knowing before reading a
-  worker count as a fleet size.
-- **A shard that starts late is logged, not reported.** Workers align to one wall-clock instant so
-  the fleet's ramp is a single curve; a shard more than 250 ms late warns in its own log and
-  nowhere else. The run's results cannot say that its ramp was uneven, which is the one place
-  somebody comparing two runs would want to know.
-- **Shard rounding shifts the total by a request or two.** 200 req/s across 3 workers gives shards
-  of 67/67/66 — exact — but each shard rounds its own ramp-up integral independently, so a run may
-  issue 3 501 rather than 3 500. Visible, bounded, and not worth a distributed counter to remove.
-- **gRPC ingestion is single-endpoint.** Workers dial one ingestor address with no client-side load
-  balancing, so scaling ingestors horizontally needs a proxy in front. The NATS path scales by
-  simply adding a subscriber.
-- **A congested gRPC stream costs a window, not the worker's heap.** `onNext` on a stream gRPC is
-  not ready to write buffers inside the client without limit, so an ingestor slower than the fleet
-  would be paid for in the worker's memory — and a load generator collecting garbage under memory
-  pressure distorts the latency it is measuring. Blocking is not an option either: the send happens
-  on the thread that records samples. So the window is dropped and its measurements are reported as
-  dropped samples, along with any counters it was carrying.
-- **The ingestor's `rejected` count is logged, not reported.** The gRPC summary arrives when the
-  stream half-closes, after the final snapshot has already been shipped, and it counts snapshots
-  rather than measurements — the worker cannot know how many requests were inside the ones the
-  ingestor threw away. Attributing ingestor-side loss to a run belongs on the ingestor, which still
-  holds the snapshot when it drops it.
+  instance would duplicate every worker-completion message and run a second watchdog over the same
+  rows. Scaling it needs a queue group and a leader, not another container.
+- **Coordination state is in-memory.** Redis persistence is off, so a restart mid-run loses worker
+  liveness and shard claims. Run and scenario state is unaffected — that lives in PostgreSQL.
+- **Fleet membership is counted with Redis `KEYS`.** Microseconds at this project's key counts, a
+  single-threaded stall on a shared Redis with a large keyspace. `SCAN` is the fix.
+- **Fleet size is frozen at dispatch.** Workers that start mid-run sit it out; a rate that changed
+  halfway would splice two experiments together.
+- **A fleet larger than the arrival rate leaves workers idle.** 3 req/s across 5 workers gives
+  1/1/1/0/0. The total is exact, but two workers issue nothing, so the reported worker count is not
+  the fleet size.
+- **Shard rounding shifts the total by a request or two.** Each shard rounds its own ramp-up
+  integral, so a run may issue 3 501 rather than 3 500. Bounded, and not worth a distributed
+  counter to remove.
+
+**Getting measurements to storage**
+
+- **gRPC ingestion is single-endpoint.** No client-side load balancing, so scaling ingestors
+  horizontally needs a proxy. The NATS path scales by adding a subscriber.
+- **A congested gRPC stream costs a window, not the worker's heap.** Unbounded client buffering
+  would make the load generator collect garbage under exactly the pressure it is measuring, and the
+  send happens on the thread recording samples, so blocking is not available either. The window is
+  dropped and reported as dropped samples (decision 3).
+- **The ingestor's `rejected` count is logged, not reported.** The gRPC summary arrives on
+  half-close, after the last snapshot has shipped, and it counts snapshots rather than
+  measurements. Ingestor-side loss is attributed by the ingestor instead, as `unstoredSamples`.
 - **The two ingest tables are written without a transaction.** ClickHouse offers none spanning
-  them, so a failure between the inserts can leave a batch half-stored. The order is chosen so the
-  survivable half is the distribution: buckets are written first, and a run that hits this
-  under-reports requests while its percentiles stay correct. The mismatch is visible as
-  `sum(count)` in `latency_buckets` exceeding `sum(request_count)` in `metric_snapshots`; the
-  reverse ordering would give a percentile computed over part of the population with every counter
-  looking complete. A snapshot whose histogram will not decode is the one case where the imbalance
-  points the other way, and it costs only that snapshot's latency.
+  them, so a failure between the inserts can half-store a batch. Buckets are written first, which
+  makes the survivable half the distribution: the run under-reports requests and the mismatch shows
+  as `sum(count)` exceeding `sum(request_count)`. The reverse order would give a percentile computed
+  over part of the population with every counter looking complete.
 
 ---
 
